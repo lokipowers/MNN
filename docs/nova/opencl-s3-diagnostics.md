@@ -175,3 +175,10 @@ but do not constitute an element-by-element comparison.
 NOVA_OPENCL_FAIL_FAST=1 NOVA_OPENCL_NO_WORKGROUP_HINT=1 \
 NOVA_S3_CONV2_C4H1W4_AUTO=1 ./novaConv2Smoke.out 3 1 1
 ```
+
+`NOVA_S3_CONV1_AUTO_LWS=1` also enables driver-selected LWS for the exact
+first S3 convolution (128 input channels, 1000 to 500 frames). Combine
+with `NOVA_S3_CONV1_KERNEL=conv_2d_c4h1w4` to pin its kernel while
+avoiding tuner submissions. Both switches are opt-in. Full-model testing
+with a 2000 ms hangcheck period still failed at conv1 with forced LWS 1x1;
+conv2 was not reached.

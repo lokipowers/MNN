@@ -568,6 +568,11 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
         const bool novaConv2Auto = novaForceC4H4W1 &&
             novaConv2AutoEnv && novaConv2AutoEnv[0] == '1';
 
+        const char* novaConv1AutoEnv = std::getenv("NOVA_S3_CONV1_AUTO_LWS");
+        const bool novaConv1Auto = novaForceS3Conv && !novaForceC4H4W1 &&
+            novaConv1AutoEnv && novaConv1AutoEnv[0] == '1';
+        const bool novaAutoLWS = novaConv2Auto || novaConv1Auto;
+
         // Pin only the first S3 convolution for a controlled kernel A/B.
         // Otherwise the tuner bypass overwrites min_index for every candidate,
         // leaving c8h4w1 selected without any measured execution cost.
@@ -581,7 +586,8 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
                 MNN_ERROR("[nova-opencl] invalid NOVA_S3_CONV1_KERNEL=%s\n", novaConv1Kernel);
                 return INVALID_VALUE;
             }
-            MNN_PRINT("[nova-opencl] pinning S3 conv1 kernel=%s LWS=1,1\n", novaConv1Kernel);
+            MNN_PRINT("[nova-opencl] pinning S3 conv1 kernel=%s LWS=%s\n",
+                      novaConv1Kernel, novaConv1Auto ? "auto" : "1,1");
         }
 
         if (novaForceC4H4W1) {
@@ -637,9 +643,9 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
                 // real kernel executions and can poison the in-order queue.
                 min_cost.first = 0;
                 min_cost.second = knl_idx;
-                mLocalWorkSize = novaConv2Auto ? std::vector<uint32_t>{0, 0} : std::vector<uint32_t>{1, 1};
+                mLocalWorkSize = novaAutoLWS ? std::vector<uint32_t>{0, 0} : std::vector<uint32_t>{1, 1};
                 MNN_PRINT("[nova-opencl] bypassing LWS tuner for S3 stride-2 conv LWS=%s\n",
-                          novaConv2Auto ? "auto" : "1,1");
+                          novaAutoLWS ? "auto" : "1,1");
             } else {
                 std::pair<std::vector<uint32_t>, uint32_t> retTune;
                 retTune = localWS2DDefault(globalWorkSize[knl_idx], maxWorkGroupSize, mOpenCLBackend->getOpenCLRuntime(), kernelName[knl_idx] + info, kernel[knl_idx], mOpenCLBackend->getCLTuneLevel(), "conv_2d");
