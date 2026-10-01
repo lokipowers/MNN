@@ -130,3 +130,33 @@ NOVA_OPENCL_FAIL_FAST=1 ./novaConv2Smoke.out 3 1 1 2>&1 \
 The binding diagnostic passes object compilation; all 12 OpenCL C entry points
 referenced by ConvExecution are defined by the compiled dynamic wrapper. Device
 validation remains pending.
+
+## Work-group hint A/B
+
+The FD702 binding run queried all four images successfully, bound all 16 kernel
+arguments and reported kernel_max_wg=32. The output image is physically larger
+than its logical shape, which can be legitimate pooled-image reuse; the reported
+image dimensions alone do not prove invalid indexing or adequate memory lifetime.
+
+The runtime emits -DSET_ATTRIBUTE=false when it intends to disable attributes,
+but conv_2d kernels use #ifdef SET_ATTRIBUTE, so the 16x16 work-group hint remains
+present. A hint is not a required work-group size, so this discrepancy alone does
+not prove the cause of CL_OUT_OF_RESOURCES.
+
+NOVA_OPENCL_NO_WORKGROUP_HINT=1 omits this definition entirely in both cached and
+source kernel-build paths. Existing default build options are preserved. The
+changed build-option string uses a distinct in-memory program-cache key. Test
+in a fresh process, keeping precision, kernel choice and LWS the same:
+
+```bash
+cd ~/nova-mnn/build
+set -o pipefail
+make -j2 novaConv2Smoke.out &&
+NOVA_OPENCL_FAIL_FAST=1 NOVA_OPENCL_NO_WORKGROUP_HINT=1 \
+  ./novaConv2Smoke.out 3 1 1 2>&1 | tee /tmp/nova-conv-no-hint.log
+```
+
+Host checks compile OpenCLRuntime with the dynamic wrapper and preprocess the
+actual conv_2d.cl under default versus omitted definitions, confirming the hint
+is present with SET_ATTRIBUTE=false and absent with the diagnostic switch.
+Hardware validation remains pending.

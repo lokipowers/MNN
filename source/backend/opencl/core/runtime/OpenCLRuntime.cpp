@@ -25,6 +25,15 @@ using namespace CLCache;
 namespace MNN {
 
 extern const std::map<std::string, const char*> OpenCLProgramMap;
+// SET_ATTRIBUTE is tested with #ifdef in the kernel sources: defining it as
+// false still emits the work-group hint. Allow a controlled driver A/B with
+// the macro entirely absent, without changing the default build options.
+static std::string novaWorkGroupAttributeOption(bool enabled) {
+    const char* noHint = std::getenv("NOVA_OPENCL_NO_WORKGROUP_HINT");
+    if (noHint && noHint[0] == '1') return "";
+    return enabled ? " -DSET_ATTRIBUTE=true" : " -DSET_ATTRIBUTE=false";
+}
+
 static std::mutex gCLMutex;
 static std::weak_ptr<::cl::Context> globalContext;
 static std::mutex gCLContextMutex;
@@ -932,11 +941,7 @@ std::string OpenCLRuntime::makeBuildOptionsStr(const std::set<std::string>& buil
         }
     }
 
-    if (isSetWorkGroupAttribute) {
-        buildOptionsStr += " -DSET_ATTRIBUTE=true";
-    } else {
-        buildOptionsStr += " -DSET_ATTRIBUTE=false";
-    }
+    buildOptionsStr += novaWorkGroupAttributeOption(isSetWorkGroupAttribute);
     for (auto& option : buildOptions) {
         buildOptionsStr += " " + option;
     }
@@ -1073,11 +1078,7 @@ std::shared_ptr<KernelWrap> OpenCLRuntime::buildKernelFromSource(const std::stri
             "-DCONVERT_FLOAT4=convert_float4";
     }
 
-    if (isSetWorkGroupAttribute) {
-        buildOptionsStr += " -DSET_ATTRIBUTE=true";
-    } else {
-        buildOptionsStr += " -DSET_ATTRIBUTE=false";
-    }
+    buildOptionsStr += novaWorkGroupAttributeOption(isSetWorkGroupAttribute);
     for (auto& option : buildOptions) {
         buildOptionsStr += " " + option;
     }
