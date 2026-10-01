@@ -252,3 +252,13 @@ For the encoder/projection boundary use
 reshape/format-conversion names were not exposed to runtime callbacks.
 The input is copied to plain CAFFE layout and requires float32 type.
 Always verify the dump file exists before comparing runs.
+
+`NOVA_MNN_ENCODER_DUMP_DIR=/existing/directory` captures float32 input
+tensors at every named `/blocks.*` LayerNorm operation and the final
+quantizer projection in one run. Each file uses the operation name with
+slashes replaced by underscores. Compare matching CPU/GPU files by
+absolute and relative RMS error; this identifies where drift grows,
+not necessarily which arithmetic operation causes it. On the tested
+model there are six transformer blocks, two LayerNorm points per block,
+and one projection point. Use fresh directories and verify all 13 files
+exist on each backend. Default runs remain unchanged.

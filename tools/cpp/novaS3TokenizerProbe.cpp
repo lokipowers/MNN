@@ -98,7 +98,9 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
     const char* requestedDumpPath = std::getenv("NOVA_MNN_DUMP_PATH");
     const bool wantDump = requestedDumpOp && *requestedDumpOp &&
                           requestedDumpPath && *requestedDumpPath;
-    if (!wantTrace && !wantLog && !wantDump) return;
+    const char* encoderDirEnv = std::getenv("NOVA_MNN_ENCODER_DUMP_DIR");
+    const std::string encoderDir = encoderDirEnv ? encoderDirEnv : "";
+    if (!wantTrace && !wantLog && !wantDump && encoderDir.empty()) return;
 
     rtmgr->setMode(Interpreter::Session_Debug);
     std::shared_ptr<std::ofstream> out;
@@ -121,33 +123,45 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
     const bool dumpInput = dumpInputEnv && dumpInputEnv[0] == '1';
 
     MNN::TensorCallBackWithInfo before =
-        [dumpOp, dumpPath, dumpInput](const std::vector<MNN::Tensor*>& tensors,
+        [dumpOp, dumpPath, dumpInput, encoderDir](const std::vector<MNN::Tensor*>& tensors,
                                      const MNN::OperatorInfo* info) {
             printTensorMeta("before", info, tensors);
-            if (!dumpInput || !info || info->name() != dumpOp || dumpPath.empty()) return true;
+            if (!info) return true;
+            const std::string name = info->name();
+            const bool encoderPoint = !encoderDir.empty() &&
+                ((info->type() == "LayerNorm" && name.find("/blocks.") == 0) ||
+                 name == "/quantizer/project_in/Add_output_0__matmul_converted");
+            const bool namedPoint = dumpInput && name == dumpOp && !dumpPath.empty();
+            if (!encoderPoint && !namedPoint) return true;
+            std::string capturePath = dumpPath;
+            if (encoderPoint) {
+                std::string fileName = name;
+                std::replace(fileName.begin(), fileName.end(), '/', '_');
+                capturePath = encoderDir + "/" + fileName + ".f32";
+            }
             if (tensors.empty() || !tensors[0]) return false;
             auto* src = tensors[0];
             std::unique_ptr<MNN::Tensor> host(new MNN::Tensor(src, MNN::Tensor::CAFFE));
             if (!src->copyToHostTensor(host.get()) ||
                 host->getType() != halide_type_of<float>() ||
                 host->elementSize() <= 0 || !host->host<float>()) {
-                std::fprintf(stderr, "[s3-mnn] input dump readback/type failed op=%s\n", dumpOp.c_str());
+                std::fprintf(stderr, "[s3-mnn] input dump readback/type failed op=%s\n", name.c_str());
                 return false;
             }
-            std::ofstream bin(dumpPath, std::ios::binary | std::ios::trunc);
+            std::ofstream bin(capturePath, std::ios::binary | std::ios::trunc);
             if (!bin) {
-                std::fprintf(stderr, "[s3-mnn] unable to open input dump: %s\n", dumpPath.c_str());
+                std::fprintf(stderr, "[s3-mnn] unable to open input dump: %s\n", capturePath.c_str());
                 return false;
             }
             bin.write(reinterpret_cast<const char*>(host->host<float>()),
                       static_cast<std::streamsize>(host->elementSize()) * sizeof(float));
             bin.close();
             if (bin.fail()) {
-                std::fprintf(stderr, "[s3-mnn] input dump write failed: %s\n", dumpPath.c_str());
+                std::fprintf(stderr, "[s3-mnn] input dump write failed: %s\n", capturePath.c_str());
                 return false;
             }
             std::printf("[s3-mnn] dumped input op=%s tensor=0 dims=%s format=NCHW elements=%d path=%s\n",
-                        dumpOp.c_str(), dimsString(host.get()).c_str(), host->elementSize(), dumpPath.c_str());
+                        name.c_str(), dimsString(host.get()).c_str(), host->elementSize(), capturePath.c_str());
             std::fflush(stdout);
             return true;
         };
