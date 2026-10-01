@@ -14,6 +14,7 @@
 #include "backend/opencl/core/OpenCLBackend.hpp"
 #include "backend/opencl/core/OpenCLRunningUtils.hpp"
 #include "ConvLowMemoryExecution.hpp"
+#include <cstdlib>
 
 namespace MNN {
 namespace OpenCL {
@@ -561,6 +562,22 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
             mResource->mStrides[0] == 2 && mResource->mStrides[1] == 1 &&
             mResource->mDilations[0] == 1 && mResource->mDilations[1] == 1;
 
+        // Pin only the first S3 convolution for a controlled kernel A/B.
+        // Otherwise the tuner bypass overwrites min_index for every candidate,
+        // leaving c8h4w1 selected without any measured execution cost.
+        int novaConv1KernelIndex = -1;
+        const char* novaConv1Kernel = std::getenv("NOVA_S3_CONV1_KERNEL");
+        if (novaForceS3Conv && !novaForceC4H4W1 && novaConv1Kernel && *novaConv1Kernel) {
+            for (int i = 0; i < total_kernel; ++i) {
+                if (kernelName[i] == novaConv1Kernel) novaConv1KernelIndex = i;
+            }
+            if (novaConv1KernelIndex < 0) {
+                MNN_ERROR("[nova-opencl] invalid NOVA_S3_CONV1_KERNEL=%s\n", novaConv1Kernel);
+                return INVALID_VALUE;
+            }
+            MNN_PRINT("[nova-opencl] pinning S3 conv1 kernel=%s LWS=1,1\n", novaConv1Kernel);
+        }
+
         if (novaForceC4H4W1) {
             kernelName[0] = "conv_2d_c4h4w1";
             itemC[0] = 4;
@@ -571,6 +588,7 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
 
         const int novaKernelCount = novaForceC4H4W1 ? 1 : total_kernel;
         for(int knl_idx = 0; knl_idx < novaKernelCount; knl_idx++) {
+            if (novaConv1KernelIndex >= 0 && knl_idx != novaConv1KernelIndex) continue;
             std::set<std::string> buildOption = mResource->mBuildOptions;
             if(itemC[knl_idx] == 8 && outputShape.at(3) % itemC[knl_idx] > 0 && outputShape.at(3) % itemC[knl_idx] <= 4){
                 buildOption.emplace("-DCHANNEL_BOUNDARY_PROTECT");

@@ -71,3 +71,33 @@ Fault injection against the actual CommonExecution source checks prior-queue,
 enqueue, wait, negative-status, status-query, incomplete-status failures, success,
 record-replay bypass, automatic LWS, and 3D work sizes in both profiler modes.
 No UNO hardware run has been performed by this change's author.
+
+## UNO result and conv1 A/B
+
+The first serial fail-fast hardware run passed all three initial Raster units
+(image_to_nchw_buffer, raster_buffer, nchw_buffer_to_image) and then failed
+/conv1/Conv_output_0, conv_2d_c8h4w1, GWS 160,125, LWS 1,1 with wait=-14,
+status=-5. Conv2 was not executed. This localizes the first failing execution
+in that run; it does not establish whether driver resource pressure, indexing,
+or another kernel/driver issue is the underlying cause.
+
+Set NOVA_S3_CONV1_KERNEL to conv_2d_c4h1w4, conv_2d_c4h4w1, or
+conv_2d_c8h4w1 to pin ONLY the first exact S3 geometry (128 channels,
+1000x1 input -> 1280 channels, 500x1 output, 3x1 kernel, stride 2x1,
+dilation 1x1). LWS remains 1x1; conv2 and all other geometries are unchanged.
+An invalid name is rejected for this geometry. With the variable unset,
+the uploaded selection behavior is preserved.
+
+First compare c4h1w4 against the already observed c8h4w1 failure:
+
+```bash
+cd ~/nova-mnn/build
+set -o pipefail
+make -j2 novaS3TokenizerProbe.out &&
+NOVA_OPENCL_FAIL_FAST=1 NOVA_S3_CONV1_KERNEL=conv_2d_c4h1w4 \
+  ./novaS3TokenizerProbe.out /tmp/s3tokenizer-v2-len1000.mnn \
+  3 1000 0 0 1 2>&1 | tee /tmp/nova-conv1-c4h1w4.log
+```
+
+Expected conv1 selection is GWS 320,500 and LWS 1,1. A completed conv1 may
+expose a later failure; this is not a promise of full-model correctness.
