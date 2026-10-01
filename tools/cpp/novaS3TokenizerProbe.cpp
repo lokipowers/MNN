@@ -350,6 +350,27 @@ int main(int argc, char** argv) {
                 info->size > 0 ? outputPtr[0] : -1);
     std::fflush(stdout);
 
+    // Dump all materialized tokens, one decimal int32 per line, for exact
+    // CPU/OpenCL comparison. A requested dump must succeed to report success.
+    const char* tokenDumpPath = std::getenv("NOVA_S3_TOKEN_DUMP");
+    if (tokenDumpPath && *tokenDumpPath) {
+        std::ofstream tokens(tokenDumpPath, std::ios::out | std::ios::trunc);
+        if (!tokens.is_open()) {
+            std::fprintf(stderr, "[s3-mnn] unable to open token dump: %s\n", tokenDumpPath);
+            return 11;
+        }
+        for (size_t i = 0; i < info->size; ++i) {
+            tokens << outputPtr[i] << '\n';
+        }
+        tokens.close();
+        if (tokens.fail()) {
+            std::fprintf(stderr, "[s3-mnn] token dump write failed: %s\n", tokenDumpPath);
+            return 11;
+        }
+        std::printf("[s3-mnn] token_dump=%s elements=%zu\n", tokenDumpPath, info->size);
+        std::fflush(stdout);
+    }
+
     float memoryMB = 0.0f;
     if (rtmgr->getInfo(Interpreter::MEMORY, &memoryMB)) {
         std::printf("[s3-mnn] runtime memory=%.1f MB\n", memoryMB);

@@ -182,3 +182,14 @@ with `NOVA_S3_CONV1_KERNEL=conv_2d_c4h1w4` to pin its kernel while
 avoiding tuner submissions. Both switches are opt-in. Full-model testing
 with a 2000 ms hangcheck period still failed at conv1 with forced LWS 1x1;
 conv2 was not reached.
+
+## Compare every output token
+
+Set `NOVA_S3_TOKEN_DUMP=/path/to/tokens.txt` on the tokenizer probe to
+write every materialized int32 token as one decimal value per line.
+File open, write and close failures return exit code 11. The option does
+not alter model inputs or kernel settings. Use separate CPU and OpenCL
+paths and compare with `cmp`; verify that both files contain 250 lines
+for this 1000-frame model. Only compare dumps from successful runs with
+identical model, frames, frozen-length setting and zero features.
+Agreement validates this zero-input case, not arbitrary speech inputs.
