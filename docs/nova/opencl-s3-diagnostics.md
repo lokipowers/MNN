@@ -233,3 +233,14 @@ validation of variable-length padding or the full speech pipeline.
 It requires existing torch, numpy and s3tokenizer; no model download.
 Compare original CPU, split CPU and split GPU tokens for this identical
 fixture. The exporter refuses to overwrite an existing fixture.
+
+## Quantizer rounding comparison
+
+For this model, inspect `/quantizer/Sub_output_0` immediately before
+`/quantizer/Round_output_0`. The quantizer uses bounded values and
+rounding, not a nearest-codebook distance search. Set `NOVA_MNN_DUMP_OP`
+and `NOVA_MNN_DUMP_PATH` together; dumps now work without enabling trace
+or hitting its op limit. Selected tensors are copied to a plain CAFFE
+(NCHW) host layout, with shape printed in the log. Dumps are float32
+binary. Host-copy and file-write failures stop the callback. Compare
+CPU and GPU dumps from the same split model and speech feature fixture.

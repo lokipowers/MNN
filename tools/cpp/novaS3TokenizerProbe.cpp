@@ -94,7 +94,11 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
     const char* logToEnv = std::getenv("NOVA_MNN_LOG_OPS_TO");
     const bool wantTrace = path && *path;
     const bool wantLog = logFromEnv && *logFromEnv;
-    if (!wantTrace && !wantLog) return;
+    const char* requestedDumpOp = std::getenv("NOVA_MNN_DUMP_OP");
+    const char* requestedDumpPath = std::getenv("NOVA_MNN_DUMP_PATH");
+    const bool wantDump = requestedDumpOp && *requestedDumpOp &&
+                          requestedDumpPath && *requestedDumpPath;
+    if (!wantTrace && !wantLog && !wantDump) return;
 
     rtmgr->setMode(Interpreter::Session_Debug);
     std::shared_ptr<std::ofstream> out;
@@ -133,17 +137,22 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                              tensors.size());
                 std::fflush(stdout);
             }
-            if (!out || opIndex >= maxOps) return true;
+            const bool selectedDump = info && !dumpPath.empty() && !dumpOp.empty() &&
+                                      info->name() == dumpOp;
+            const bool traceThis = out && opIndex < maxOps;
+            if (!traceThis && !selectedDump) return true;
 
             for (size_t ti = 0; ti < tensors.size(); ++ti) {
                 MNN::Tensor* src = tensors[ti];
                 if (!src) continue;
 
                 std::shared_ptr<MNN::Tensor> host(
-                    new MNN::Tensor(src, src->getDimensionType()));
-                if (src->copyToHostTensor(host.get())) {
-                    src = host.get();
+                    new MNN::Tensor(src, selectedDump ? MNN::Tensor::CAFFE : src->getDimensionType()));
+                if (!src->copyToHostTensor(host.get())) {
+                    std::fprintf(stderr, "[s3-mnn] tensor readback failed op=%s\n", info->name().c_str());
+                    return false;
                 }
+                src = host.get();
 
                 const int n = src->elementSize();
                 const auto type = src->getType();
@@ -172,16 +181,22 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                         bin.write(reinterpret_cast<const char*>(src->host<float>()),
                                   static_cast<std::streamsize>(n * sizeof(float)));
                         bin.close();
+                        if (bin.fail()) {
+                            std::fprintf(stderr, "[s3-mnn] tensor dump write failed: %s\n", dumpPath.c_str());
+                            return false;
+                        }
                         std::fprintf(stdout,
-                                     "[s3-mnn] dumped op=%s tensor=%zu elements=%d path=%s\n",
-                                     info->name().c_str(), ti, n, dumpPath.c_str());
+                                     "[s3-mnn] dumped op=%s tensor=%zu dims=%s format=NCHW elements=%d path=%s\n",
+                                     info->name().c_str(), ti, dimsString(src).c_str(), n, dumpPath.c_str());
                         std::fflush(stdout);
                     } else {
                         std::fprintf(stderr, "[s3-mnn] unable to dump tensor to %s\n",
                                      dumpPath.c_str());
+                        return false;
                     }
                 }
 
+                if (!traceThis) continue;
                 const double mean = (numeric && n > 0) ? (sum / static_cast<double>(n)) : 0.0;
                 *out << opIndex << '\t'
                      << info->name() << '\t'
@@ -198,7 +213,7 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                      << sumsq << '\t'
                      << weighted << '\n';
             }
-            out->flush();
+            if (out) out->flush();
             return true;
         };
 
