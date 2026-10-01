@@ -117,15 +117,43 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
     const char* dumpPathEnv = std::getenv("NOVA_MNN_DUMP_PATH");
     const std::string dumpOp = dumpOpEnv ? dumpOpEnv : "";
     const std::string dumpPath = dumpPathEnv ? dumpPathEnv : "";
+    const char* dumpInputEnv = std::getenv("NOVA_MNN_DUMP_INPUT");
+    const bool dumpInput = dumpInputEnv && dumpInputEnv[0] == '1';
 
     MNN::TensorCallBackWithInfo before =
-        [](const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+        [dumpOp, dumpPath, dumpInput](const std::vector<MNN::Tensor*>& tensors,
+                                     const MNN::OperatorInfo* info) {
             printTensorMeta("before", info, tensors);
+            if (!dumpInput || !info || info->name() != dumpOp || dumpPath.empty()) return true;
+            if (tensors.empty() || !tensors[0]) return false;
+            auto* src = tensors[0];
+            std::unique_ptr<MNN::Tensor> host(new MNN::Tensor(src, MNN::Tensor::CAFFE));
+            if (!src->copyToHostTensor(host.get()) ||
+                host->getType() != halide_type_of<float>() ||
+                host->elementSize() <= 0 || !host->host<float>()) {
+                std::fprintf(stderr, "[s3-mnn] input dump readback/type failed op=%s\n", dumpOp.c_str());
+                return false;
+            }
+            std::ofstream bin(dumpPath, std::ios::binary | std::ios::trunc);
+            if (!bin) {
+                std::fprintf(stderr, "[s3-mnn] unable to open input dump: %s\n", dumpPath.c_str());
+                return false;
+            }
+            bin.write(reinterpret_cast<const char*>(host->host<float>()),
+                      static_cast<std::streamsize>(host->elementSize()) * sizeof(float));
+            bin.close();
+            if (bin.fail()) {
+                std::fprintf(stderr, "[s3-mnn] input dump write failed: %s\n", dumpPath.c_str());
+                return false;
+            }
+            std::printf("[s3-mnn] dumped input op=%s tensor=0 dims=%s format=NCHW elements=%d path=%s\n",
+                        dumpOp.c_str(), dimsString(host.get()).c_str(), host->elementSize(), dumpPath.c_str());
+            std::fflush(stdout);
             return true;
         };
 
     MNN::TensorCallBackWithInfo after =
-        [out, counter, maxOps, logFrom, logTo, dumpOp, dumpPath](const std::vector<MNN::Tensor*>& tensors,
+        [out, counter, maxOps, logFrom, logTo, dumpOp, dumpPath, dumpInput](const std::vector<MNN::Tensor*>& tensors,
                                                                                 const MNN::OperatorInfo* info) {
             const int opIndex = (*counter)++;
             printTensorMeta("after", info, tensors);
@@ -137,7 +165,7 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                              tensors.size());
                 std::fflush(stdout);
             }
-            const bool selectedDump = info && !dumpPath.empty() && !dumpOp.empty() &&
+            const bool selectedDump = !dumpInput && info && !dumpPath.empty() && !dumpOp.empty() &&
                                       info->name() == dumpOp;
             const bool traceThis = out && opIndex < maxOps;
             if (!traceThis && !selectedDump) return true;
@@ -173,7 +201,7 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                     numeric = true;
                 }
 
-                if (!dumpPath.empty() && !dumpOp.empty() &&
+                if (selectedDump && !dumpPath.empty() && !dumpOp.empty() &&
                     info->name() == dumpOp && ti == 0 &&
                     n > 0 && type.code == halide_type_float && type.bits == 32) {
                     std::ofstream bin(dumpPath, std::ios::binary | std::ios::trunc);

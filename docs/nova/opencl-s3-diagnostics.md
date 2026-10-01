@@ -244,3 +244,11 @@ or hitting its op limit. Selected tensors are copied to a plain CAFFE
 (NCHW) host layout, with shape printed in the log. Dumps are float32
 binary. Host-copy and file-write failures stop the callback. Compare
 CPU and GPU dumps from the same split model and speech feature fixture.
+
+`NOVA_MNN_DUMP_INPUT=1` selects the first input of the named runtime
+operation, captured by its before callback, instead of its output.
+For the encoder/projection boundary use
+`/quantizer/project_in/Add_output_0__matmul_converted`; graph-only
+reshape/format-conversion names were not exposed to runtime callbacks.
+The input is copied to plain CAFFE layout and requires float32 type.
+Always verify the dump file exists before comparing runs.
