@@ -217,3 +217,19 @@ before the next is submitted and receives its own profiling event.
 Default execution and other kernels are unchanged. This is an opt-in
 diagnostic for the MLP hang after split conv1/conv2, requiring hardware
 validation and complete CPU token comparison.
+
+## Speech feature fixtures
+
+`NOVA_S3_FEATURES=/path/to/features.f32` replaces zero features with
+exactly 128*frames native float32 values in contiguous channel-first
+order. Invalid byte lengths, read failures and nonfinite values fail
+with exit code 12. Default zero-input behavior is unchanged.
+`tools/nova/export_s3_features.py AUDIO OUTPUT` uses the installed
+S3Tokenizer preprocessing to create a little-endian 128x1000 fixture
+(UNO is little-endian). It uses the first 10 seconds of audio, extending
+shorter clips with waveform silence. All 1000 frames are treated as valid
+by the probe, so this is a fixed-duration backend comparison, not a
+validation of variable-length padding or the full speech pipeline.
+It requires existing torch, numpy and s3tokenizer; no model download.
+Compare original CPU, split CPU and split GPU tokens for this identical
+fixture. The exporter refuses to overwrite an existing fixture.

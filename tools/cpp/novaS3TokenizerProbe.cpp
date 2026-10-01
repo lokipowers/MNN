@@ -294,6 +294,29 @@ int main(int argc, char** argv) {
     }
     std::memset(featsPtr, 0, static_cast<size_t>(128) * frames * sizeof(float));
 
+    const char* featurePath = std::getenv("NOVA_S3_FEATURES");
+    if (featurePath && *featurePath) {
+        const size_t count = static_cast<size_t>(128) * frames;
+        const auto bytes = static_cast<std::streamsize>(count * sizeof(float));
+        std::ifstream featureFile(featurePath, std::ios::binary | std::ios::ate);
+        if (!featureFile || featureFile.tellg() != bytes) {
+            std::fprintf(stderr, "[s3-mnn] feature file must contain exactly %zu float32 values: %s\n",
+                         count, featurePath);
+            return 12;
+        }
+        featureFile.seekg(0);
+        featureFile.read(reinterpret_cast<char*>(featsPtr), bytes);
+        if (!featureFile) return 12;
+        for (size_t i = 0; i < count; ++i) {
+            if (!std::isfinite(featsPtr[i])) {
+                std::fprintf(stderr, "[s3-mnn] nonfinite feature at index=%zu\n", i);
+                return 12;
+            }
+        }
+        std::printf("[s3-mnn] features=%s layout=1x128x%d float32 elements=%zu\n",
+                    featurePath, frames, count);
+    }
+
     std::vector<VARP> inputs{feats};
     if (!frozenLength) {
         mark("set feats_length");
