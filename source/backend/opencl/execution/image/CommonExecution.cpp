@@ -89,31 +89,52 @@ ErrorCode CommonExecution::onExecute(const std::vector<Tensor *> &inputs, const 
 #else
         cl::Event* eventPtr = failFast ? &event : nullptr;
 #endif
-        const cl_int res = runtime->commandQueue().enqueueNDRangeKernel(
-            unit.kernel->get(), cl::NullRange, unit.globalWorkSize,
-            unit.localWorkSize, nullptr, eventPtr);
-        if (res != CL_SUCCESS) {
-            MNN_ERROR("[nova-exec] FIRST FAILURE phase=enqueue op=%s name=%s unit=%d res=%d\n",
-                      EnumNameOpType(mOpType), opName, unitIndex, res);
-            return INVALID_VALUE;
-        }
-        if (failFast) {
-            const cl_int waitRes = event.wait();
-            cl_int infoRes = CL_SUCCESS;
-            const cl_int status = event.getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&infoRes);
-            MNN_PRINT("[nova-exec] op=%s name=%s unit=%d wait_res=%d post_status=%d info_res=%d\n",
-                      EnumNameOpType(mOpType), opName, unitIndex, waitRes, status, infoRes);
-            if (waitRes != CL_SUCCESS || infoRes != CL_SUCCESS || status != CL_COMPLETE) {
-                MNN_ERROR("[nova-exec] FIRST FAILURE phase=execute op=%s name=%s unit=%d "
-                          "kernel=%s wait_res=%d post_status=%d info_res=%d\n",
-                          EnumNameOpType(mOpType), opName, unitIndex, kernelName.c_str(),
-                          waitRes, status, infoRes);
+        // Diagnostic only: partition independent 1x1 output rows. Preserve
+        // the kernel arguments and LWS; global offsets retain output indices.
+        const char* tileEnv = std::getenv("NOVA_OPENCL_1X1_ROWS");
+        const int requestedRows = tileEnv ? std::atoi(tileEnv) : 0;
+        const bool tile1x1 = failFast && requestedRows > 0 &&
+            kernelName == "conv_2d_1x1" && unit.globalWorkSize.dimensions() == 2;
+        const size_t totalRows = tile1x1 ? unit.globalWorkSize.get()[1] : 1;
+        const size_t localRows = unit.localWorkSize.dimensions() == 2 ?
+            std::max(size_t(1), unit.localWorkSize.get()[1]) : 1;
+        const size_t tileRows = tile1x1 ?
+            ROUND_UP(static_cast<size_t>(requestedRows), localRows) : 1;
+        for (size_t row = 0; row < totalRows; row += tileRows) {
+            cl::NDRange dispatchOffset = cl::NullRange;
+            cl::NDRange dispatchSize = unit.globalWorkSize;
+            if (tile1x1) {
+                const size_t rows = std::min(tileRows, totalRows - row);
+                dispatchOffset = cl::NDRange(0, row);
+                dispatchSize = cl::NDRange(unit.globalWorkSize.get()[0], rows);
+                MNN_PRINT("[nova-exec] 1x1 tile row=%zu rows=%zu total=%zu\n", row, rows, totalRows);
+            }
+            const cl_int res = runtime->commandQueue().enqueueNDRangeKernel(
+                unit.kernel->get(), dispatchOffset, dispatchSize,
+                unit.localWorkSize, nullptr, eventPtr);
+            if (res != CL_SUCCESS) {
+                MNN_ERROR("[nova-exec] FIRST FAILURE phase=enqueue op=%s name=%s unit=%d res=%d\n",
+                          EnumNameOpType(mOpType), opName, unitIndex, res);
                 return INVALID_VALUE;
             }
+            if (failFast) {
+                const cl_int waitRes = event.wait();
+                cl_int infoRes = CL_SUCCESS;
+                const cl_int status = event.getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&infoRes);
+                MNN_PRINT("[nova-exec] op=%s name=%s unit=%d wait_res=%d post_status=%d info_res=%d\n",
+                          EnumNameOpType(mOpType), opName, unitIndex, waitRes, status, infoRes);
+                if (waitRes != CL_SUCCESS || infoRes != CL_SUCCESS || status != CL_COMPLETE) {
+                    MNN_ERROR("[nova-exec] FIRST FAILURE phase=execute op=%s name=%s unit=%d "
+                              "kernel=%s wait_res=%d post_status=%d info_res=%d\n",
+                              EnumNameOpType(mOpType), opName, unitIndex, kernelName.c_str(),
+                              waitRes, status, infoRes);
+                    return INVALID_VALUE;
+                }
+            }
+    #ifdef ENABLE_OPENCL_TIME_PROFILER
+            runtime->pushEvent({EnumNameOpType(mOpType) + std::to_string(unitIndex), event});
+    #endif
         }
-#ifdef ENABLE_OPENCL_TIME_PROFILER
-        runtime->pushEvent({EnumNameOpType(mOpType) + std::to_string(unitIndex), event});
-#endif
         ++unitIndex;
     }
     return NO_ERROR;

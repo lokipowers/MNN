@@ -205,3 +205,15 @@ FlatBuffer and rejects grouped, fused-activation, quantized or external
 weight convolutions rather than silently changing their semantics.
 CPU original vs CPU split vs OpenCL split token dumps must all agree.
 This is a model-specific workaround trial, not a general runtime fix.
+
+## Shorter 1x1 submissions
+
+With fail-fast enabled, `NOVA_OPENCL_1X1_ROWS=16` partitions image
+`conv_2d_1x1` execution into output-row submissions. Global offsets
+preserve kernel output indexing; kernel arguments, accumulation order
+and local work size are unchanged. Row counts are rounded to the local
+work size for uniform-group devices. Every tile is waited on and checked
+before the next is submitted and receives its own profiling event.
+Default execution and other kernels are unchanged. This is an opt-in
+diagnostic for the MLP hang after split conv1/conv2, requiring hardware
+validation and complete CPU token comparison.
