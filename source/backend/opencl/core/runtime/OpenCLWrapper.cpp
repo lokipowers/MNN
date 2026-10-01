@@ -57,6 +57,7 @@ bool OpenCLSymbols::LoadOpenCLLibrary() {
 #endif
 #elif defined(__linux__)
         "/usr/lib/libOpenCL.so",
+        "libOpenCL.so.1",
         "/usr/local/lib/libOpenCL.so",
         "/usr/local/lib/libpocl.so",
         "/usr/lib64/libOpenCL.so",

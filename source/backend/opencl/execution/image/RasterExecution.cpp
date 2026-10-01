@@ -65,7 +65,7 @@ ErrorCode RasterExecution::onEncode(const std::vector<Tensor *> &____inputs, con
             int region[] = {outputShape[0], UP_DIV(outputShape[3], 4), outputShape[1], outputShape[2]};//nhwc
             Unit &unit          = mUnits[kernel_idx++];
             unit.kernel         = runtime->buildKernel("raster", "image_set_zero", {}, mOpenCLBackend->getPrecision(), output, output);
-            unit.localWorkSize  = {8, 8};
+            unit.localWorkSize  = {1, 1};
             unit.globalWorkSize = {(uint32_t)UP_DIV((region[1] * region[3]), 16)*16,
                                    (uint32_t)UP_DIV((region[0] * region[2]), 16)*16};
 
@@ -81,10 +81,15 @@ ErrorCode RasterExecution::onEncode(const std::vector<Tensor *> &____inputs, con
             {
                 MNN_PRINT("setArg err %d\n", (int)ret);
             }
+            MNN_PRINT("[nova-raster] image_set_zero GWS=%u,%u LWS=1,1 region=%d,%d,%d,%d\\n",
+                      (uint32_t)UP_DIV((region[1] * region[3]), 16)*16,
+                      (uint32_t)UP_DIV((region[0] * region[2]), 16)*16,
+                      region[0], region[1], region[2], region[3]);
+
             mOpenCLBackend->recordKernel2d(unit.kernel,
                 {(uint32_t)UP_DIV((region[1] * region[3]), 16)*16,
                 (uint32_t)UP_DIV((region[0] * region[2]), 16)*16},
-                {8, 8});
+                {1, 1});
         }
         
         // image raster

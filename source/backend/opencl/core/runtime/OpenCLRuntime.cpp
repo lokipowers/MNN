@@ -1127,8 +1127,22 @@ uint64_t OpenCLRuntime::getMaxLocalMem() const {
     return mMaxLocalMemSize;
 }
 double OpenCLRuntime::getCostTime(const cl::Event* event) {
-    // cl_int res = mCommandQueuePtr->finish();
+    // Diagnostic: inspect the event's actual execution status before waiting.
+    cl_int statusRes = CL_SUCCESS;
+    cl_int eventStatus = event->getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&statusRes);
+
+    MNN_PRINT("[nova-opencl-event] pre-wait status=%d info_res=%d\\n",
+              eventStatus, statusRes);
+
     cl_int res = event->wait();
+
+    cl_int postStatusRes = CL_SUCCESS;
+    cl_int postEventStatus =
+        event->getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&postStatusRes);
+
+    MNN_PRINT("[nova-opencl-event] wait_res=%d post_status=%d info_res=%d\\n",
+              res, postEventStatus, postStatusRes);
+
     MNN_CHECK_CL_SUCCESS(res, "clEvent");
     if (res != CL_SUCCESS) {
         return -1.0;
@@ -1418,8 +1432,27 @@ bool OpenCLRuntime::setCache(std::pair<const void*, size_t> cache) {
 }
 
 unsigned int OpenCLRuntime::getEventTime(cl::Event& event) {
+    cl_int statusRes = CL_SUCCESS;
+    cl_int eventStatus =
+        event.getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&statusRes);
+
+    MNN_PRINT("[nova-opencl-event-time] pre-wait status=%d info_res=%d\\n",
+              eventStatus, statusRes);
+
     cl_int res = event.wait();
+
+    cl_int postStatusRes = CL_SUCCESS;
+    cl_int postEventStatus =
+        event.getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&postStatusRes);
+
+    MNN_PRINT("[nova-opencl-event-time] wait_res=%d post_status=%d info_res=%d\\n",
+              res, postEventStatus, postStatusRes);
+
     MNN_CHECK_CL_SUCCESS(res, "clEvent");
+    if (res != CL_SUCCESS) {
+        return 0;
+    }
+
     auto StartNanos = event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
     auto StopNanos = event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
     return (unsigned int)((StopNanos - StartNanos) / 1000.0);
@@ -1438,7 +1471,32 @@ void OpenCLRuntime::printEventTime() {
     std::vector<std::pair<std::string, int>> kernels(mEvents.size());
     for (int i = 0; i < mEvents.size(); ++i) {
         auto event = &mEvents[i].second;
+
+        cl_int statusRes = CL_SUCCESS;
+        cl_int eventStatus =
+            event->getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&statusRes);
+
+        MNN_PRINT("[nova-opencl-event] name=%s pre_status=%d info_res=%d\\n",
+                  mEvents[i].first.c_str(), eventStatus, statusRes);
+
         cl_int res = event->wait();
+
+        cl_int postStatusRes = CL_SUCCESS;
+        cl_int postEventStatus =
+            event->getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&postStatusRes);
+
+        MNN_PRINT("[nova-opencl-event] name=%s wait_res=%d post_status=%d post_info_res=%d\\n",
+                  mEvents[i].first.c_str(), res,
+                  postEventStatus, postStatusRes);
+
+        if (res != CL_SUCCESS) {
+            MNN_PRINT("[nova-opencl-event] FAILED name=%s pre_status=%d post_status=%d\\n",
+                      mEvents[i].first.c_str(),
+                      eventStatus, postEventStatus);
+            MNN_CHECK_CL_SUCCESS(res, "clEvent");
+            continue;
+        }
+
         MNN_CHECK_CL_SUCCESS(res, "clEvent");
         auto StartNanos = event->getProfilingInfo<CL_PROFILING_COMMAND_START>();
         auto StopNanos = event->getProfilingInfo<CL_PROFILING_COMMAND_END>();

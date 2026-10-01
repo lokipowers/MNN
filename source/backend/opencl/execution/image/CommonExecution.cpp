@@ -53,6 +53,8 @@ ErrorCode CommonExecution::onExecute(const std::vector<Tensor *> &inputs, const 
     }
 #endif
     auto res = CL_SUCCESS;
+    int novaUnitIndex = 0;
+
     for (auto &unit : mUnits) {
     #ifdef ENABLE_OPENCL_TIME_PROFILER
         cl::Event event;
@@ -64,12 +66,69 @@ ErrorCode CommonExecution::onExecute(const std::vector<Tensor *> &inputs, const 
                                                     &event);
         runtime->pushEvent({EnumNameOpType(mOpType) + std::to_string(idx++), event});
     #else
-        res = runtime->commandQueue().enqueueNDRangeKernel(unit.kernel->get(),
-                                                    cl::NullRange,
-                                                    unit.globalWorkSize,
-                                                    unit.localWorkSize);
-    #endif
+        cl::Event novaEvent;
+
+        MNN_PRINT("[nova-exec] op=%s unit=%d GWS=%u,%u LWS=%u,%u\\n",
+                  EnumNameOpType(mOpType),
+                  novaUnitIndex,
+                  (uint32_t)unit.globalWorkSize.get()[0],
+                  (uint32_t)unit.globalWorkSize.get()[1],
+                  (uint32_t)unit.localWorkSize.get()[0],
+                  (uint32_t)unit.localWorkSize.get()[1]);
+
+        res = runtime->commandQueue().enqueueNDRangeKernel(
+            unit.kernel->get(),
+            cl::NullRange,
+            unit.globalWorkSize,
+            unit.localWorkSize,
+            nullptr,
+            &novaEvent);
+
         MNN_CHECK_CL_SUCCESS(res, EnumNameOpType(mOp->type()));
+
+        if (res == CL_SUCCESS) {
+            cl_int statusRes = CL_SUCCESS;
+            cl_int preStatus =
+                novaEvent.getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&statusRes);
+
+            MNN_PRINT("[nova-exec] op=%s unit=%d prewait_status=%d info_res=%d\\n",
+                      EnumNameOpType(mOpType),
+                      novaUnitIndex,
+                      preStatus,
+                      statusRes);
+
+            cl_int waitRes = novaEvent.wait();
+
+            cl_int postStatusRes = CL_SUCCESS;
+            cl_int postStatus =
+                novaEvent.getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>(&postStatusRes);
+
+            MNN_PRINT("[nova-exec] op=%s unit=%d wait_res=%d post_status=%d info_res=%d\\n",
+                      EnumNameOpType(mOpType),
+                      novaUnitIndex,
+                      waitRes,
+                      postStatus,
+                      postStatusRes);
+
+            if (waitRes != CL_SUCCESS || postStatus < 0) {
+                MNN_ERROR("[nova-exec] FIRST FAILURE op=%s unit=%d "
+                          "GWS=%u,%u LWS=%u,%u "
+                          "wait_res=%d post_status=%d info_res=%d\\n",
+                          EnumNameOpType(mOpType),
+                          novaUnitIndex,
+                          (uint32_t)unit.globalWorkSize.get()[0],
+                          (uint32_t)unit.globalWorkSize.get()[1],
+                          (uint32_t)unit.localWorkSize.get()[0],
+                          (uint32_t)unit.localWorkSize.get()[1],
+                          waitRes,
+                          postStatus,
+                          postStatusRes);
+                return OUT_OF_MEMORY;
+            }
+        }
+    #endif
+
+        ++novaUnitIndex;
     }
     return NO_ERROR;
 }

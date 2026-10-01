@@ -494,7 +494,83 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
         std::vector<uint32_t> localWorkSize[total_kernel];
         std::pair<int, int> min_cost(INT_MAX, 0);//(min_time, min_index)
         
-        for(int knl_idx = 0; knl_idx < total_kernel; knl_idx++) {
+        // Nova/UNO Q workaround: MNN 3.6.1's h4w1 image kernels are
+        // incorrect/failing for the S3 tokenizer's tall, width-1 conv2.
+        // Restrict only this exact geometry to the conservative h1w4 kernel.
+        if (inputChannels == 1280 || channel == 1280) {
+            MNN_PRINT("[nova-opencl-dim] IC=%d C=%d IH=%d IW=%d H=%d W=%d KH=%d KW=%d S=%d,%d D=%d,%d\\n",
+                      inputChannels, channel, inputHeight, inputWidth,
+                      height, width, kernelHeight, kernelWidth,
+                      mResource->mStrides[0], mResource->mStrides[1],
+                      mResource->mDilations[0], mResource->mDilations[1]);
+        }
+
+        MNN_PRINT("[nova-opencl-buffer] input_dims=%d output_dims=%d\n",
+                  input->buffer().dimensions, output->buffer().dimensions);
+
+        MNN_PRINT("[nova-opencl-buffer] input_extents=");
+        for (int i = 0; i < input->buffer().dimensions; ++i) {
+            MNN_PRINT("%s%d", i ? "," : "", input->buffer().dim[i].extent);
+        }
+        MNN_PRINT(" output_extents=");
+        for (int i = 0; i < output->buffer().dimensions; ++i) {
+            MNN_PRINT("%s%d", i ? "," : "", output->buffer().dim[i].extent);
+        }
+        MNN_PRINT("\n");
+
+        MNN_PRINT("[nova-opencl-tensor] input_dims=%d output_dims=%d input_lengths=",
+                  input->dimensions(), output->dimensions());
+        for (int i = 0; i < input->dimensions(); ++i) {
+            MNN_PRINT("%s%d", i ? "," : "", input->length(i));
+        }
+        MNN_PRINT(" output_lengths=");
+        for (int i = 0; i < output->dimensions(); ++i) {
+            MNN_PRINT("%s%d", i ? "," : "", output->length(i));
+        }
+        MNN_PRINT("\n");
+
+        MNN_PRINT("[nova-opencl-shapes] input=%d,%d,%d,%d output=%d,%d,%d,%d\n",
+                  inputShape.at(0), inputShape.at(1),
+                  inputShape.at(2), inputShape.at(3),
+                  outputShape.at(0), outputShape.at(1),
+                  outputShape.at(2), outputShape.at(3));
+
+        const bool novaForceS3Conv =
+            (
+                inputChannels == 128 && channel == 1280 &&
+                inputHeight == 1000 && inputWidth == 1 &&
+                height == 500 && width == 1 &&
+                kernelHeight == 3 && kernelWidth == 1 &&
+                mResource->mStrides[0] == 2 && mResource->mStrides[1] == 1 &&
+                mResource->mDilations[0] == 1 && mResource->mDilations[1] == 1
+            ) ||
+            (
+                inputChannels == 1280 && channel == 1280 &&
+                inputHeight == 500 && inputWidth == 1 &&
+                height == 250 && width == 1 &&
+                kernelHeight == 3 && kernelWidth == 1 &&
+                mResource->mStrides[0] == 2 && mResource->mStrides[1] == 1 &&
+                mResource->mDilations[0] == 1 && mResource->mDilations[1] == 1
+            );
+
+        const bool novaForceC4H4W1 =
+            inputChannels == 1280 && channel == 1280 &&
+            inputHeight == 500 && inputWidth == 1 &&
+            height == 250 && width == 1 &&
+            kernelHeight == 3 && kernelWidth == 1 &&
+            mResource->mStrides[0] == 2 && mResource->mStrides[1] == 1 &&
+            mResource->mDilations[0] == 1 && mResource->mDilations[1] == 1;
+
+        if (novaForceC4H4W1) {
+            kernelName[0] = "conv_2d_c4h4w1";
+            itemC[0] = 4;
+            itemH[0] = 4;
+            itemW[0] = 1;
+            MNN_PRINT("[nova-opencl] forcing conv_2d_c4h4w1 for 1280x500x1 -> 1280x250x1 conv2\\n");
+        }
+
+        const int novaKernelCount = novaForceC4H4W1 ? 1 : total_kernel;
+        for(int knl_idx = 0; knl_idx < novaKernelCount; knl_idx++) {
             std::set<std::string> buildOption = mResource->mBuildOptions;
             if(itemC[knl_idx] == 8 && outputShape.at(3) % itemC[knl_idx] > 0 && outputShape.at(3) % itemC[knl_idx] <= 4){
                 buildOption.emplace("-DCHANNEL_BOUNDARY_PROTECT");
@@ -530,17 +606,51 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
             }
             MNN_CHECK_CL_SUCCESS(ret, "setArg ConvExecution Kernel Select");
             
-            std::pair<std::vector<uint32_t>, uint32_t> retTune;
-            retTune = localWS2DDefault(globalWorkSize[knl_idx], maxWorkGroupSize, mOpenCLBackend->getOpenCLRuntime(), kernelName[knl_idx] + info, kernel[knl_idx], mOpenCLBackend->getCLTuneLevel(), "conv_2d");
-            
-            if(min_cost.first > retTune.second) {
-                min_cost.first = retTune.second;
+            if (novaForceS3Conv) {
+                // Nova/UNO Q diagnostic: bypass MNN's LWS tuner for both
+                // tokenizer stride-2 convolutions. The tuner enqueues many
+                // real kernel executions and can poison the in-order queue.
+                min_cost.first = 0;
                 min_cost.second = knl_idx;
-                mLocalWorkSize = {retTune.first[0], retTune.first[1]};
+                mLocalWorkSize = {1, 1};
+                MNN_PRINT("[nova-opencl] bypassing LWS tuner for S3 stride-2 conv LWS 1x1\\n");
+            } else {
+                std::pair<std::vector<uint32_t>, uint32_t> retTune;
+                retTune = localWS2DDefault(globalWorkSize[knl_idx], maxWorkGroupSize, mOpenCLBackend->getOpenCLRuntime(), kernelName[knl_idx] + info, kernel[knl_idx], mOpenCLBackend->getCLTuneLevel(), "conv_2d");
+
+                if(min_cost.first > retTune.second) {
+                    min_cost.first = retTune.second;
+                    min_cost.second = knl_idx;
+                    mLocalWorkSize = {retTune.first[0], retTune.first[1]};
+                }
             }
         }
         int min_index  = min_cost.second;
+
+        MNN_PRINT("[nova-opencl] CONV SELECT kernel=%s index=%d "
+                  "GWS=%u,%u LWS=%u,%u "
+                  "shape_in=%d,%d shape_out=%d,%d "
+                  "stride=%d,%d kernel=%d,%d\\n",
+                  kernelName[min_index].c_str(),
+                  min_index,
+                  globalWorkSize[min_index][0],
+                  globalWorkSize[min_index][1],
+                  mLocalWorkSize[0],
+                  mLocalWorkSize[1],
+                  inputHeight, inputWidth,
+                  height, width,
+                  kernelHeight, kernelWidth,
+                  mResource->mStrides[0], mResource->mStrides[1]);
+
         mGlobalWorkSize = {globalWorkSize[min_index][0], globalWorkSize[min_index][1]};
+        if (novaForceC4H4W1) {
+            // Nova/UNO Q diagnostic: expanded accumulator variants of c4h1w4
+            // hit CL event failures with MNN's tuned local workgroup. Force a
+            // single work-item per group to test whether this is register /
+            // workgroup resource pressure rather than arithmetic correctness.
+            mLocalWorkSize = {1, 1};
+            MNN_PRINT("[nova-opencl] forcing LWS 1x1 for S3 conv2 diagnostic\n");
+        }
         std::set<std::string> buildOption = mResource->mBuildOptions;
         if(itemC[min_index] == 8 && outputShape.at(3) % itemC[min_index] > 0 && outputShape.at(3) % itemC[min_index] <= 4){
             buildOption.emplace("-DCHANNEL_BOUNDARY_PROTECT");

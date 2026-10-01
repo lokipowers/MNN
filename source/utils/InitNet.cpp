@@ -72,7 +72,29 @@ bool initConstTensors(std::vector<std::shared_ptr<Tensor>>& tensors, const Net* 
             }
             if (parameter->dataType() == DataType_DT_HALF) {
                 if (nullptr == parameter->uint8s()) {
-                    // Error half const
+                    // Error half const. Keep this diagnostic local to the UNO Q
+                    // accelerator bring-up so we can identify converter output
+                    // that cannot be materialized by the normal MNN runtime.
+                    const char* opName = op->name() ? op->name()->c_str() : "<unnamed>";
+                    const char* tensorName = "<unknown>";
+                    if (nullptr != net->tensorName() && index >= 0 && index < net->tensorName()->size()) {
+                        auto name = net->tensorName()->GetAsString(index);
+                        if (nullptr != name) {
+                            tensorName = name->c_str();
+                        }
+                    }
+                    MNN_ERROR(
+                        "[nova-const-trace] invalid HALF const: opIndex=%d op=%s "
+                        "tensorIndex=%d tensor=%s elements=%d bytes=%zu "
+                        "external=%d uint8s=null\n",
+                        opIndex,
+                        opName,
+                        index,
+                        tensorName,
+                        output->elementSize(),
+                        output->size(),
+                        USE_EXTERNAL_DATA(parameter) ? 1 : 0
+                    );
                     code = INVALID_VALUE;
                     return false;
                 }

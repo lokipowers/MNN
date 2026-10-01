@@ -11,10 +11,7 @@
     }
 inline float4 gelu(float4 in){
     float4 value = 0.79788458f * (0.044715f * in * in * in + in);
-    float4 x2 = value * value;
-    float4 dst = value > (float4)5.0f ? (float4)1.0f : (value <= -(float4)5.0f ? -(float4)1.0f :
-        (value * (135135.0f + x2 * (17325.0f + x2 * (378.0f + x2)))) / (135135.0f + x2 * (62370.0f + x2 * (3150.0f + x2 * 28.0f))));
-    return (1.0f + dst) * in * 0.5f;
+    return (1.0f + tanh(value)) * in * 0.5f;
 }
 // MNN: erfinv via TensorFlow's two-branch polynomial (kept in lockstep with
 // CPU's UnaryErfinv in source/backend/cpu/UnaryUtils.hpp). Avoids the OpenCL

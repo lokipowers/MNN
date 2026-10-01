@@ -62,6 +62,24 @@ list(APPEND MNN_CPP_TOOLS checkInvalidValue.out)
 add_executable(timeProfile.out ${CMAKE_CURRENT_LIST_DIR}/timeProfile.cpp ${CMAKE_CURRENT_LIST_DIR}/revertMNNModel.cpp ${CMAKE_CURRENT_LIST_DIR}/Profiler.cpp)
 list(APPEND MNN_CPP_TOOLS timeProfile.out)
 
+add_executable(novaS3TokenizerProbe.out ${CMAKE_CURRENT_LIST_DIR}/novaS3TokenizerProbe.cpp)
+list(APPEND MNN_CPP_TOOLS novaS3TokenizerProbe.out)
+
+add_executable(novaMnnSplitConvModel.out ${CMAKE_CURRENT_LIST_DIR}/novaMnnSplitConvModel.cpp)
+list(APPEND MNN_CPP_TOOLS novaMnnSplitConvModel.out)
+
+add_executable(novaConv2Smoke.out ${CMAKE_CURRENT_LIST_DIR}/novaConv2Smoke.cpp)
+list(APPEND MNN_CPP_TOOLS novaConv2Smoke.out)
+
+add_executable(novaMnnOpInspect.out ${CMAKE_CURRENT_LIST_DIR}/novaMnnOpInspect.cpp)
+list(APPEND MNN_CPP_TOOLS novaMnnOpInspect.out)
+
+add_executable(novaGeluSmoke.out ${CMAKE_CURRENT_LIST_DIR}/novaGeluSmoke.cpp)
+list(APPEND MNN_CPP_TOOLS novaGeluSmoke.out)
+
+add_executable(novaRasterSmoke.out ${CMAKE_CURRENT_LIST_DIR}/novaRasterSmoke.cpp)
+list(APPEND MNN_CPP_TOOLS novaRasterSmoke.out)
+
 add_executable(testTrain.out ${CMAKE_CURRENT_LIST_DIR}/testTrain.cpp)
 list(APPEND MNN_CPP_TOOLS testTrain.out)
 
