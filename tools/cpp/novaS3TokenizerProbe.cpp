@@ -64,7 +64,7 @@ static void printTensorMeta(const char* phase, const MNN::OperatorInfo* info,
             static_cast<void*>(t->host<void>()),
             strides.str().c_str(),
             t->elementSize(),
-            t->size());
+            static_cast<size_t>(t->size()));
     }
     std::fflush(stdout);
 }
@@ -318,6 +318,12 @@ int main(int argc, char** argv) {
         return 8;
     }
 
+    const auto* outputInfo = outputs[0]->getInfo();
+    if (!outputInfo || outputInfo->type != halide_type_of<int32_t>() || outputInfo->size <= 0) {
+        std::fprintf(stderr, "[s3-mnn] expected nonempty int32 indices output\n");
+        return 10;
+    }
+
     mark("materialize output");
     const int32_t* outputPtr = outputs[0]->readMap<int32_t>();
     const auto end = std::chrono::steady_clock::now();
@@ -339,7 +345,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < info->dim.size(); ++i) {
         std::printf("%s%d", i ? "x" : "", info->dim[i]);
     }
-    std::printf(" elements=%d first_index=%d\n",
+    std::printf(" elements=%zu first_index=%d\n",
                 info->size,
                 info->size > 0 ? outputPtr[0] : -1);
     std::fflush(stdout);
@@ -350,6 +356,6 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
     }
 
-    mark("SUCCESS");
+    mark("OUTPUT_MATERIALIZED (token correctness requires CPU comparison)");
     return 0;
 }

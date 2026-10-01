@@ -639,8 +639,8 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
                   mLocalWorkSize[1],
                   inputHeight, inputWidth,
                   height, width,
-                  kernelHeight, kernelWidth,
-                  mResource->mStrides[0], mResource->mStrides[1]);
+                  mResource->mStrides[0], mResource->mStrides[1],
+                  kernelHeight, kernelWidth);
 
         mGlobalWorkSize = {globalWorkSize[min_index][0], globalWorkSize[min_index][1]};
         if (novaForceC4H4W1) {
