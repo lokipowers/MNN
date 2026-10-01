@@ -701,6 +701,50 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
             ret |= unit.kernel->get().setArg(idx++, openCLImage(mResource->mSlope.get()));
         }
         MNN_CHECK_CL_SUCCESS(ret, "setArg ConvExecution");
+        if (ret != CL_SUCCESS) return INVALID_VALUE;
+        const char* novaFailFast = std::getenv("NOVA_OPENCL_FAIL_FAST");
+        if (novaFailFast && novaFailFast[0] == '1' && novaForceS3Conv) {
+            auto runtime = mOpenCLBackend->getOpenCLRuntime();
+            const auto maxImage = runtime->getMaxImage2DSize();
+            cl_int argsRes = CL_SUCCESS;
+            const auto numArgs = unit.kernel->get().getInfo<CL_KERNEL_NUM_ARGS>(&argsRes);
+            MNN_PRINT("[nova-conv-bind] device=%s precision=%d fp16_supported=%d "
+                      "max_image=%zu,%zu kernel_max_wg=%llu device_local_mem=%llu "
+                      "num_args=%u args_res=%d bound_args=%u weight_buffer=%d\n",
+                      runtime->getDeviceName().c_str(), mOpenCLBackend->getPrecision(),
+                      runtime->isSupportedFP16(), maxImage[0], maxImage[1],
+                      (unsigned long long)runtime->getMaxWorkGroupSize(unit.kernel),
+                      (unsigned long long)runtime->getMaxLocalMem(), numArgs, argsRes, idx,
+                      mResource->mWeightUseBuffer);
+            auto logImage = [](const char* label, const cl::Image& image) {
+                size_t width = 0, height = 0, bytes = 0;
+                cl_image_format format = {};
+                cl_mem_object_type type = 0;
+                const cl_mem mem = image();
+                const cl_int wr = clGetImageInfo(mem, CL_IMAGE_WIDTH, sizeof(width), &width, nullptr);
+                const cl_int hr = clGetImageInfo(mem, CL_IMAGE_HEIGHT, sizeof(height), &height, nullptr);
+                const cl_int fr = clGetImageInfo(mem, CL_IMAGE_FORMAT, sizeof(format), &format, nullptr);
+                const cl_int tr = clGetMemObjectInfo(mem, CL_MEM_TYPE, sizeof(type), &type, nullptr);
+                const cl_int br = clGetMemObjectInfo(mem, CL_MEM_SIZE, sizeof(bytes), &bytes, nullptr);
+                MNN_PRINT("[nova-conv-bind] %s handle=%p width=%zu height=%zu bytes=%zu "
+                          "type=0x%x order=0x%x channel_type=0x%x query_res=%d,%d,%d,%d,%d\n",
+                          label, (void*)mem, width, height, bytes, (unsigned)type,
+                          (unsigned)format.image_channel_order, (unsigned)format.image_channel_data_type,
+                          wr, hr, fr, tr, br);
+            };
+            logImage("input", openCLImage(input));
+            if (!mResource->mWeightUseBuffer) logImage("filter", openCLImage(mResource->mFilter.get()));
+            logImage("bias", openCLImage(mResource->mBias.get()));
+            logImage("output", openCLImage(output));
+            MNN_PRINT("[nova-conv-bind] input_shape=%d,%d output_shape=%d,%d "
+                      "kernel=%d,%d stride=%d,%d pad=%d,%d dilation=%d,%d "
+                      "input_c4=%d output_c4=%d width_blocks=%d height_blocks=%d\n",
+                      inputImageShape[0], inputImageShape[1], outputImageShape[0], outputImageShape[1],
+                      kernelShape[0], kernelShape[1], strideShape[0], strideShape[1],
+                      paddingShape[0], paddingShape[1], dilationShape[0], dilationShape[1],
+                      inputChannelBlocks, UP_DIV(outputShape.at(3), 4), UP_DIV(width, itemW[min_index]),
+                      UP_DIV(height, itemH[min_index]));
+        }
         mOpenCLBackend->recordKernel2d(unit.kernel, mGlobalWorkSize, mLocalWorkSize);
     }
 

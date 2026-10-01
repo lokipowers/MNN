@@ -101,3 +101,32 @@ NOVA_OPENCL_FAIL_FAST=1 NOVA_S3_CONV1_KERNEL=conv_2d_c4h1w4 \
 
 Expected conv1 selection is GWS 320,500 and LWS 1,1. A completed conv1 may
 expose a later failure; this is not a promise of full-model correctness.
+
+## FP32 result and binding diagnostic
+
+UNO CPU full-model inference materialized 250 int32 indices in 13.061 seconds,
+first ID 2648. This is a reference summary, not a complete token correctness check.
+The synthetic conv2 probe fails with Raster units passing, independently of model
+weights and attention. Both precision 0 (Normal) and 1 (High/FP32) fail at the same
+convolutions. Precision selection alone did not resolve the observed failure.
+
+With NOVA_OPENCL_FAIL_FAST=1, the exact S3 convolutions now log the effective
+precision, device, kernel argument count, maximum image dimensions and work-group
+size, device local-memory limit, and the actual bound image handles, dimensions,
+formats, sizes and query return codes. Geometry/stride/padding parameters are
+printed beside these bindings. Failed setArg now returns INVALID_VALUE rather
+than allowing execution with incomplete bindings. Kernel math is unchanged.
+
+Rebuild and run only the synthetic probe first:
+
+```bash
+cd ~/nova-mnn/build
+set -o pipefail
+make -j2 novaConv2Smoke.out &&
+NOVA_OPENCL_FAIL_FAST=1 ./novaConv2Smoke.out 3 1 1 2>&1 \
+  | tee /tmp/nova-conv-bindings.log
+```
+
+The binding diagnostic passes object compilation; all 12 OpenCL C entry points
+referenced by ConvExecution are defined by the compiled dynamic wrapper. Device
+validation remains pending.
