@@ -160,3 +160,18 @@ Host checks compile OpenCLRuntime with the dynamic wrapper and preprocess the
 actual conv_2d.cl under default versus omitted definitions, confirming the hint
 is present with SET_ATTRIBUTE=false and absent with the diagnostic switch.
 Hardware validation remains pending.
+
+## Unsplit conv2 with driver-selected local work size
+
+`NOVA_S3_CONV2_C4H1W4_AUTO=1` pins only the exact 1280x500x1 to
+1280x250x1 stride-2 conv2 to `conv_2d_c4h1w4` and uses null local
+work size (logged as `LWS=auto` during execution). It bypasses tuning
+submissions. The default forced c4h4w1 / LWS 1x1 path is unchanged.
+This compares the unsplit calculation against successful 2/4/8-chunk
+smoke runs; those runs matched all printed CPU summaries and samples,
+but do not constitute an element-by-element comparison.
+
+```sh
+NOVA_OPENCL_FAIL_FAST=1 NOVA_OPENCL_NO_WORKGROUP_HINT=1 \
+NOVA_S3_CONV2_C4H1W4_AUTO=1 ./novaConv2Smoke.out 3 1 1
+```

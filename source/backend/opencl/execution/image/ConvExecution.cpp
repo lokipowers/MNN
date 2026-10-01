@@ -562,6 +562,12 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
             mResource->mStrides[0] == 2 && mResource->mStrides[1] == 1 &&
             mResource->mDilations[0] == 1 && mResource->mDilations[1] == 1;
 
+        // Controlled unsplit conv2 A/B: match the successful split kernel,
+        // let the driver choose LWS, and avoid tuner trial submissions.
+        const char* novaConv2AutoEnv = std::getenv("NOVA_S3_CONV2_C4H1W4_AUTO");
+        const bool novaConv2Auto = novaForceC4H4W1 &&
+            novaConv2AutoEnv && novaConv2AutoEnv[0] == '1';
+
         // Pin only the first S3 convolution for a controlled kernel A/B.
         // Otherwise the tuner bypass overwrites min_index for every candidate,
         // leaving c8h4w1 selected without any measured execution cost.
@@ -579,11 +585,12 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
         }
 
         if (novaForceC4H4W1) {
-            kernelName[0] = "conv_2d_c4h4w1";
+            kernelName[0] = novaConv2Auto ? "conv_2d_c4h1w4" : "conv_2d_c4h4w1";
             itemC[0] = 4;
-            itemH[0] = 4;
-            itemW[0] = 1;
-            MNN_PRINT("[nova-opencl] forcing conv_2d_c4h4w1 for 1280x500x1 -> 1280x250x1 conv2\\n");
+            itemH[0] = novaConv2Auto ? 1 : 4;
+            itemW[0] = novaConv2Auto ? 4 : 1;
+            MNN_PRINT("[nova-opencl] forcing %s for S3 conv2 LWS=%s\n",
+                      kernelName[0].c_str(), novaConv2Auto ? "auto" : "1,1");
         }
 
         const int novaKernelCount = novaForceC4H4W1 ? 1 : total_kernel;
@@ -630,8 +637,9 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
                 // real kernel executions and can poison the in-order queue.
                 min_cost.first = 0;
                 min_cost.second = knl_idx;
-                mLocalWorkSize = {1, 1};
-                MNN_PRINT("[nova-opencl] bypassing LWS tuner for S3 stride-2 conv LWS 1x1\\n");
+                mLocalWorkSize = novaConv2Auto ? std::vector<uint32_t>{0, 0} : std::vector<uint32_t>{1, 1};
+                MNN_PRINT("[nova-opencl] bypassing LWS tuner for S3 stride-2 conv LWS=%s\n",
+                          novaConv2Auto ? "auto" : "1,1");
             } else {
                 std::pair<std::vector<uint32_t>, uint32_t> retTune;
                 retTune = localWS2DDefault(globalWorkSize[knl_idx], maxWorkGroupSize, mOpenCLBackend->getOpenCLRuntime(), kernelName[knl_idx] + info, kernel[knl_idx], mOpenCLBackend->getCLTuneLevel(), "conv_2d");
@@ -661,7 +669,7 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
                   kernelHeight, kernelWidth);
 
         mGlobalWorkSize = {globalWorkSize[min_index][0], globalWorkSize[min_index][1]};
-        if (novaForceC4H4W1) {
+        if (novaForceC4H4W1 && !novaConv2Auto) {
             // Nova/UNO Q diagnostic: expanded accumulator variants of c4h1w4
             // hit CL event failures with MNN's tuned local workgroup. Force a
             // single work-item per group to test whether this is register /
