@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -30,7 +31,8 @@ static bool writeNet(const NetT* net, const char* path) {
     if (!out) return false;
     out.write(reinterpret_cast<const char*>(builder.GetBufferPointer()),
               static_cast<std::streamsize>(builder.GetSize()));
-    return out.good();
+    out.close();
+    return !out.fail();
 }
 
 int main(int argc, char** argv) {
@@ -59,6 +61,11 @@ int main(int argc, char** argv) {
         return 4;
     }
 
+    flatbuffers::Verifier verifier(reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
+    if (!VerifyNetBuffer(verifier)) {
+        std::fprintf(stderr, "[mnn-split-conv] invalid model buffer\n");
+        return 5;
+    }
     const auto* root = GetNet(buf.data());
     if (!root) {
         std::fprintf(stderr, "[mnn-split-conv] invalid MNN model\n");
@@ -97,6 +104,15 @@ int main(int argc, char** argv) {
             "[mnn-split-conv] expected one input/output, got %zu/%zu\n",
             original->inputIndexes.size(), original->outputIndexes.size());
         return 9;
+    }
+
+    // Partial sums preserve only a dense, unquantized linear convolution.
+    // Applying a fused activation to each chunk would change the result.
+    if (conv->common->group != 1 || conv->common->relu || conv->common->relu6 ||
+        conv->quanParameter || conv->symmetricQuan || !conv->external.empty()) {
+        std::fprintf(stderr,
+            "[mnn-split-conv] requires dense unfused convolution with inline float weights\n");
+        return 10;
     }
 
     const int ic = conv->common->inputCount;

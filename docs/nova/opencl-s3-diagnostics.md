@@ -193,3 +193,15 @@ paths and compare with `cmp`; verify that both files contain 250 lines
 for this 1000-frame model. Only compare dumps from successful runs with
 identical model, frames, frozen-length setting and zero features.
 Agreement validates this zero-input case, not arbitrary speech inputs.
+
+## Model splitting at the normal hangcheck setting
+
+Use `novaMnnSplitConvModel.out` on copies of the model, first targeting
+`/conv2/Conv_output_0`, then `/conv1/Conv_output_0`, with four chunks
+each. Each chunk slices input channels and corresponding weights; bias
+is applied once, then partial outputs are summed. This bypasses the
+exact-geometry forced convolution paths. The tool now verifies the
+FlatBuffer and rejects grouped, fused-activation, quantized or external
+weight convolutions rather than silently changing their semantics.
+CPU original vs CPU split vs OpenCL split token dumps must all agree.
+This is a model-specific workaround trial, not a general runtime fix.
