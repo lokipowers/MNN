@@ -276,6 +276,7 @@ bool OpenCLSymbols::LoadLibraryFromPath(const std::string &library_path) {
     MNN_LOAD_FUNCTION_PTR(clGetDeviceInfo);
     MNN_LOAD_FUNCTION_PTR(clGetDeviceIDs);
     MNN_LOAD_FUNCTION_PTR(clRetainEvent);
+    MNN_LOAD_FUNCTION_PTR(clGetKernelInfo);
     MNN_LOAD_FUNCTION_PTR(clGetKernelWorkGroupInfo);
     MNN_LOAD_FUNCTION_PTR(clGetEventInfo);
     MNN_LOAD_FUNCTION_PTR(clGetEventProfilingInfo);
@@ -606,6 +607,15 @@ cl_int CL_API_CALL clEnqueueUnmapMemObject(cl_command_queue command_queue, cl_me
     auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clEnqueueUnmapMemObject;
     MNN_CHECK_NOTNULL(func);
     return func(command_queue, memobj, mapped_ptr, num_events_in_wait_list, event_wait_list, event);
+}
+
+cl_int CL_API_CALL clGetKernelInfo(cl_kernel kernel, cl_kernel_info param_name,
+                                 size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
+    auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clGetKernelInfo;
+    if (func == nullptr) {
+        return CL_INVALID_OPERATION;
+    }
+    return func(kernel, param_name, param_value_size, param_value, param_value_size_ret);
 }
 
 cl_int CL_API_CALL clGetKernelWorkGroupInfo(cl_kernel kernel, cl_device_id device, cl_kernel_work_group_info param_name,
