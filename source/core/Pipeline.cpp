@@ -7,6 +7,7 @@
 //
 
 #include <string.h>
+#include <cstdlib>
 #include "core/Pipeline.hpp"
 #include "core/Backend.hpp"
 #include "core/Macro.h"
@@ -1199,6 +1200,11 @@ ErrorCode Pipeline::execute() {
                 MNN_PRINT("Group: %d, %s - %d, type=%s, inputs: %s, devices: %s - %s\n", cmd.group, info.op->name()->c_str(), cmdIndex, EnumNameOpType(cmd.op->type()), groupOfInput.c_str(), deviceOfInput.c_str(), deviceOfOutput.c_str());
             }
 #endif
+            if (std::getenv("NOVA_BACKEND_AUDIT")) {
+                MNN_PRINT("[nova-audit] op=%s name=%s actual_backend=%d primary_backend=%d backup_backend=%d\n",
+                    EnumNameOpType(cmd.op->type()), cmd.op->name() ? cmd.op->name()->c_str() : "<unnamed>",
+                    (int)cmd.execution->backend()->type(), (int)mBackend->type(), (int)mBackupBackend->type());
+            }
             auto code = cmd.execution->onExecute(cmd.workInputs, cmd.workOutputs);
             if (NO_ERROR != code) {
                 _exitExecute();
@@ -1246,7 +1252,12 @@ ErrorCode Pipeline::executeCallBack(const TensorCallBackWithInfo& before, const 
             auto cmdP = buffer.command[cmdIndex];
             auto& cmd = *cmdP;
             if (nullptr == cmd.info.get()) {
-                auto code = cmd.execution->onExecute(cmd.workInputs, cmd.workOutputs);
+                if (std::getenv("NOVA_BACKEND_AUDIT")) {
+                MNN_PRINT("[nova-audit] op=%s name=%s actual_backend=%d primary_backend=%d backup_backend=%d\n",
+                    EnumNameOpType(cmd.op->type()), cmd.op->name() ? cmd.op->name()->c_str() : "<unnamed>",
+                    (int)cmd.execution->backend()->type(), (int)mBackend->type(), (int)mBackupBackend->type());
+            }
+            auto code = cmd.execution->onExecute(cmd.workInputs, cmd.workOutputs);
                 if (NO_ERROR != code) {
                     _exitExecute();
                     return code;
@@ -1255,7 +1266,12 @@ ErrorCode Pipeline::executeCallBack(const TensorCallBackWithInfo& before, const 
             }
             auto run = before(cmd.workInputs, cmd.info.get());
             if (run) {
-                auto code = cmd.execution->onExecute(cmd.workInputs, cmd.workOutputs);
+                if (std::getenv("NOVA_BACKEND_AUDIT")) {
+                MNN_PRINT("[nova-audit] op=%s name=%s actual_backend=%d primary_backend=%d backup_backend=%d\n",
+                    EnumNameOpType(cmd.op->type()), cmd.op->name() ? cmd.op->name()->c_str() : "<unnamed>",
+                    (int)cmd.execution->backend()->type(), (int)mBackend->type(), (int)mBackupBackend->type());
+            }
+            auto code = cmd.execution->onExecute(cmd.workInputs, cmd.workOutputs);
                 if (NO_ERROR != code) {
                     _exitExecute();
                     return code;

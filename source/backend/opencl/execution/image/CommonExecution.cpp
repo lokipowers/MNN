@@ -91,23 +91,70 @@ ErrorCode CommonExecution::onExecute(const std::vector<Tensor *> &inputs, const 
 #endif
         // Diagnostic only: partition independent 1x1 output rows. Preserve
         // the kernel arguments and LWS; global offsets retain output indices.
-        const char* tileEnv = std::getenv("NOVA_OPENCL_1X1_ROWS");
+        // The listed image kernels address independent outputs with global IDs.
+        // Bound each dispatch without changing arguments or accumulation order.
+        // Issue 99 review candidate: FD702 FP32 S3 stride-2 and MLP geometries.
+        // Other convolutions retain their dispatch size. Diagnostic serialization stays.
+        bool rowIndependentConv = false;
+        if (failFast && mOpType == OpType_Convolution &&
+            mOp->main_type() == OpParameter_Convolution2D &&
+            !inputs.empty() && !outputs.empty()) {
+            const auto in = tensorShapeFormat(inputs[0]);
+            const auto out = tensorShapeFormat(outputs[0]);
+            const auto common = mOp->main_as_Convolution2D()->common();
+            if (common) {
+                MNN_PRINT("[nova-scope] name=%s in=%d,%d,%d,%d out=%d,%d,%d,%d kernel=%d,%d stride=%d,%d dilation=%d,%d group=%d\n",
+                    opName, in[0], in[1], in[2], in[3], out[0], out[1], out[2], out[3],
+                    common->kernelY(), common->kernelX(), common->strideY(), common->strideX(),
+                    common->dilateY(), common->dilateX(), common->group());
+                const bool unit2d = unit.globalWorkSize.dimensions() == 2 &&
+                    unit.localWorkSize.dimensions() == 2 &&
+                    unit.localWorkSize.get()[0] == 1 && unit.localWorkSize.get()[1] == 1;
+                const bool conv1 = in == std::vector<int>({1,1000,1,128}) &&
+                    out == std::vector<int>({1,500,1,1280}) &&
+                    kernelName == "conv_2d_c8h4w1" && unit2d &&
+                    unit.globalWorkSize.get()[0] == 160 && unit.globalWorkSize.get()[1] == 125;
+                const bool conv2 = in == std::vector<int>({1,500,1,1280}) &&
+                    out == std::vector<int>({1,250,1,1280}) &&
+                    kernelName == "conv_2d_c4h4w1" && unit2d &&
+                    unit.globalWorkSize.get()[0] == 320 && unit.globalWorkSize.get()[1] == 63;
+                const bool mlp = in[0] == 250 && out[0] == 250 &&
+                    in[1] == 1 && out[1] == 1 && in[2] == 1 && out[2] == 1 &&
+                    ((in[3] == 1280 && out[3] == 5120) || (in[3] == 5120 && out[3] == 1280)) &&
+                    common->kernelY() == 1 && common->kernelX() == 1 &&
+                    common->strideY() == 1 && common->strideX() == 1 &&
+                    kernelName == "conv_2d_1x1" && unit.globalWorkSize.dimensions() == 2 &&
+                    unit.globalWorkSize.get()[0] == static_cast<size_t>(out[3] / 4) &&
+                    unit.globalWorkSize.get()[1] == 250 && unit.localWorkSize.dimensions() == 0;
+                rowIndependentConv = runtime->getDeviceName() == "FD702" &&
+                    openCLBackend->getPrecision() == BackendConfig::Precision_High &&
+                    common->dilateY() == 1 && common->dilateX() == 1 && common->group() == 1 &&
+                    ((common->kernelY() == 3 && common->kernelX() == 1 &&
+                      common->strideY() == 2 && common->strideX() == 1 && (conv1 || conv2)) || mlp);
+            }
+        }
+        const char* convTileEnv = std::getenv("NOVA_OPENCL_CONV_ROWS");
+        const char* tileEnv = kernelName == "conv_2d_1x1" && !convTileEnv ?
+            std::getenv("NOVA_OPENCL_1X1_ROWS") : convTileEnv;
         const int requestedRows = tileEnv ? std::atoi(tileEnv) : 0;
-        const bool tile1x1 = failFast && requestedRows > 0 &&
-            kernelName == "conv_2d_1x1" && unit.globalWorkSize.dimensions() == 2;
-        const size_t totalRows = tile1x1 ? unit.globalWorkSize.get()[1] : 1;
+        // Preserve the pre-existing explicitly requested 1x1 diagnostic.
+        // NOVA_OPENCL_CONV_ROWS applies only to the FD702 S3 gate above.
+        const bool legacy1x1 = !convTileEnv && kernelName == "conv_2d_1x1";
+        const bool tileConv = failFast && requestedRows > 0 &&
+            (rowIndependentConv || legacy1x1) && unit.globalWorkSize.dimensions() == 2;
+        const size_t totalRows = tileConv ? unit.globalWorkSize.get()[1] : 1;
         const size_t localRows = unit.localWorkSize.dimensions() == 2 ?
             std::max(size_t(1), unit.localWorkSize.get()[1]) : 1;
-        const size_t tileRows = tile1x1 ?
+        const size_t tileRows = tileConv ?
             ROUND_UP(static_cast<size_t>(requestedRows), localRows) : 1;
         for (size_t row = 0; row < totalRows; row += tileRows) {
             cl::NDRange dispatchOffset = cl::NullRange;
             cl::NDRange dispatchSize = unit.globalWorkSize;
-            if (tile1x1) {
+            if (tileConv) {
                 const size_t rows = std::min(tileRows, totalRows - row);
                 dispatchOffset = cl::NDRange(0, row);
                 dispatchSize = cl::NDRange(unit.globalWorkSize.get()[0], rows);
-                MNN_PRINT("[nova-exec] 1x1 tile row=%zu rows=%zu total=%zu\n", row, rows, totalRows);
+                MNN_PRINT("[nova-exec] conv tile kernel=%s row=%zu rows=%zu total=%zu\n", kernelName.c_str(), row, rows, totalRows);
             }
             const cl_int res = runtime->commandQueue().enqueueNDRangeKernel(
                 unit.kernel->get(), dispatchOffset, dispatchSize,
