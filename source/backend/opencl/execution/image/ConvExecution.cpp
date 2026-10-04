@@ -14,6 +14,7 @@
 #include "backend/opencl/core/OpenCLBackend.hpp"
 #include "backend/opencl/core/OpenCLRunningUtils.hpp"
 #include "ConvLowMemoryExecution.hpp"
+#include <cstdlib>
 
 namespace MNN {
 namespace OpenCL {
@@ -561,16 +562,46 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
             mResource->mStrides[0] == 2 && mResource->mStrides[1] == 1 &&
             mResource->mDilations[0] == 1 && mResource->mDilations[1] == 1;
 
+        // Controlled unsplit conv2 A/B: match the successful split kernel,
+        // let the driver choose LWS, and avoid tuner trial submissions.
+        const char* novaConv2AutoEnv = std::getenv("NOVA_S3_CONV2_C4H1W4_AUTO");
+        const bool novaConv2Auto = novaForceC4H4W1 &&
+            novaConv2AutoEnv && novaConv2AutoEnv[0] == '1';
+
+        const char* novaConv1AutoEnv = std::getenv("NOVA_S3_CONV1_AUTO_LWS");
+        const bool novaConv1Auto = novaForceS3Conv && !novaForceC4H4W1 &&
+            novaConv1AutoEnv && novaConv1AutoEnv[0] == '1';
+        const bool novaAutoLWS = novaConv2Auto || novaConv1Auto;
+
+        // Pin only the first S3 convolution for a controlled kernel A/B.
+        // Otherwise the tuner bypass overwrites min_index for every candidate,
+        // leaving c8h4w1 selected without any measured execution cost.
+        int novaConv1KernelIndex = -1;
+        const char* novaConv1Kernel = std::getenv("NOVA_S3_CONV1_KERNEL");
+        if (novaForceS3Conv && !novaForceC4H4W1 && novaConv1Kernel && *novaConv1Kernel) {
+            for (int i = 0; i < total_kernel; ++i) {
+                if (kernelName[i] == novaConv1Kernel) novaConv1KernelIndex = i;
+            }
+            if (novaConv1KernelIndex < 0) {
+                MNN_ERROR("[nova-opencl] invalid NOVA_S3_CONV1_KERNEL=%s\n", novaConv1Kernel);
+                return INVALID_VALUE;
+            }
+            MNN_PRINT("[nova-opencl] pinning S3 conv1 kernel=%s LWS=%s\n",
+                      novaConv1Kernel, novaConv1Auto ? "auto" : "1,1");
+        }
+
         if (novaForceC4H4W1) {
-            kernelName[0] = "conv_2d_c4h4w1";
+            kernelName[0] = novaConv2Auto ? "conv_2d_c4h1w4" : "conv_2d_c4h4w1";
             itemC[0] = 4;
-            itemH[0] = 4;
-            itemW[0] = 1;
-            MNN_PRINT("[nova-opencl] forcing conv_2d_c4h4w1 for 1280x500x1 -> 1280x250x1 conv2\\n");
+            itemH[0] = novaConv2Auto ? 1 : 4;
+            itemW[0] = novaConv2Auto ? 4 : 1;
+            MNN_PRINT("[nova-opencl] forcing %s for S3 conv2 LWS=%s\n",
+                      kernelName[0].c_str(), novaConv2Auto ? "auto" : "1,1");
         }
 
         const int novaKernelCount = novaForceC4H4W1 ? 1 : total_kernel;
         for(int knl_idx = 0; knl_idx < novaKernelCount; knl_idx++) {
+            if (novaConv1KernelIndex >= 0 && knl_idx != novaConv1KernelIndex) continue;
             std::set<std::string> buildOption = mResource->mBuildOptions;
             if(itemC[knl_idx] == 8 && outputShape.at(3) % itemC[knl_idx] > 0 && outputShape.at(3) % itemC[knl_idx] <= 4){
                 buildOption.emplace("-DCHANNEL_BOUNDARY_PROTECT");
@@ -612,8 +643,9 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
                 // real kernel executions and can poison the in-order queue.
                 min_cost.first = 0;
                 min_cost.second = knl_idx;
-                mLocalWorkSize = {1, 1};
-                MNN_PRINT("[nova-opencl] bypassing LWS tuner for S3 stride-2 conv LWS 1x1\\n");
+                mLocalWorkSize = novaAutoLWS ? std::vector<uint32_t>{0, 0} : std::vector<uint32_t>{1, 1};
+                MNN_PRINT("[nova-opencl] bypassing LWS tuner for S3 stride-2 conv LWS=%s\n",
+                          novaAutoLWS ? "auto" : "1,1");
             } else {
                 std::pair<std::vector<uint32_t>, uint32_t> retTune;
                 retTune = localWS2DDefault(globalWorkSize[knl_idx], maxWorkGroupSize, mOpenCLBackend->getOpenCLRuntime(), kernelName[knl_idx] + info, kernel[knl_idx], mOpenCLBackend->getCLTuneLevel(), "conv_2d");
@@ -639,11 +671,11 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
                   mLocalWorkSize[1],
                   inputHeight, inputWidth,
                   height, width,
-                  kernelHeight, kernelWidth,
-                  mResource->mStrides[0], mResource->mStrides[1]);
+                  mResource->mStrides[0], mResource->mStrides[1],
+                  kernelHeight, kernelWidth);
 
         mGlobalWorkSize = {globalWorkSize[min_index][0], globalWorkSize[min_index][1]};
-        if (novaForceC4H4W1) {
+        if (novaForceC4H4W1 && !novaConv2Auto) {
             // Nova/UNO Q diagnostic: expanded accumulator variants of c4h1w4
             // hit CL event failures with MNN's tuned local workgroup. Force a
             // single work-item per group to test whether this is register /
@@ -683,6 +715,50 @@ ErrorCode ConvExecution::onEncode(const std::vector<Tensor *> &inputs, const std
             ret |= unit.kernel->get().setArg(idx++, openCLImage(mResource->mSlope.get()));
         }
         MNN_CHECK_CL_SUCCESS(ret, "setArg ConvExecution");
+        if (ret != CL_SUCCESS) return INVALID_VALUE;
+        const char* novaFailFast = std::getenv("NOVA_OPENCL_FAIL_FAST");
+        if (novaFailFast && novaFailFast[0] == '1' && novaForceS3Conv) {
+            auto runtime = mOpenCLBackend->getOpenCLRuntime();
+            const auto maxImage = runtime->getMaxImage2DSize();
+            cl_int argsRes = CL_SUCCESS;
+            const auto numArgs = unit.kernel->get().getInfo<CL_KERNEL_NUM_ARGS>(&argsRes);
+            MNN_PRINT("[nova-conv-bind] device=%s precision=%d fp16_supported=%d "
+                      "max_image=%zu,%zu kernel_max_wg=%llu device_local_mem=%llu "
+                      "num_args=%u args_res=%d bound_args=%u weight_buffer=%d\n",
+                      runtime->getDeviceName().c_str(), mOpenCLBackend->getPrecision(),
+                      runtime->isSupportedFP16(), maxImage[0], maxImage[1],
+                      (unsigned long long)runtime->getMaxWorkGroupSize(unit.kernel),
+                      (unsigned long long)runtime->getMaxLocalMem(), numArgs, argsRes, idx,
+                      mResource->mWeightUseBuffer);
+            auto logImage = [](const char* label, const cl::Image& image) {
+                size_t width = 0, height = 0, bytes = 0;
+                cl_image_format format = {};
+                cl_mem_object_type type = 0;
+                const cl_mem mem = image();
+                const cl_int wr = clGetImageInfo(mem, CL_IMAGE_WIDTH, sizeof(width), &width, nullptr);
+                const cl_int hr = clGetImageInfo(mem, CL_IMAGE_HEIGHT, sizeof(height), &height, nullptr);
+                const cl_int fr = clGetImageInfo(mem, CL_IMAGE_FORMAT, sizeof(format), &format, nullptr);
+                const cl_int tr = clGetMemObjectInfo(mem, CL_MEM_TYPE, sizeof(type), &type, nullptr);
+                const cl_int br = clGetMemObjectInfo(mem, CL_MEM_SIZE, sizeof(bytes), &bytes, nullptr);
+                MNN_PRINT("[nova-conv-bind] %s handle=%p width=%zu height=%zu bytes=%zu "
+                          "type=0x%x order=0x%x channel_type=0x%x query_res=%d,%d,%d,%d,%d\n",
+                          label, (void*)mem, width, height, bytes, (unsigned)type,
+                          (unsigned)format.image_channel_order, (unsigned)format.image_channel_data_type,
+                          wr, hr, fr, tr, br);
+            };
+            logImage("input", openCLImage(input));
+            if (!mResource->mWeightUseBuffer) logImage("filter", openCLImage(mResource->mFilter.get()));
+            logImage("bias", openCLImage(mResource->mBias.get()));
+            logImage("output", openCLImage(output));
+            MNN_PRINT("[nova-conv-bind] input_shape=%d,%d output_shape=%d,%d "
+                      "kernel=%d,%d stride=%d,%d pad=%d,%d dilation=%d,%d "
+                      "input_c4=%d output_c4=%d width_blocks=%d height_blocks=%d\n",
+                      inputImageShape[0], inputImageShape[1], outputImageShape[0], outputImageShape[1],
+                      kernelShape[0], kernelShape[1], strideShape[0], strideShape[1],
+                      paddingShape[0], paddingShape[1], dilationShape[0], dilationShape[1],
+                      inputChannelBlocks, UP_DIV(outputShape.at(3), 4), UP_DIV(width, itemW[min_index]),
+                      UP_DIV(height, itemH[min_index]));
+        }
         mOpenCLBackend->recordKernel2d(unit.kernel, mGlobalWorkSize, mLocalWorkSize);
     }
 

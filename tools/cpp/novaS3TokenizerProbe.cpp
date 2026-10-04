@@ -64,7 +64,7 @@ static void printTensorMeta(const char* phase, const MNN::OperatorInfo* info,
             static_cast<void*>(t->host<void>()),
             strides.str().c_str(),
             t->elementSize(),
-            t->size());
+            static_cast<size_t>(t->size()));
     }
     std::fflush(stdout);
 }
@@ -94,7 +94,13 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
     const char* logToEnv = std::getenv("NOVA_MNN_LOG_OPS_TO");
     const bool wantTrace = path && *path;
     const bool wantLog = logFromEnv && *logFromEnv;
-    if (!wantTrace && !wantLog) return;
+    const char* requestedDumpOp = std::getenv("NOVA_MNN_DUMP_OP");
+    const char* requestedDumpPath = std::getenv("NOVA_MNN_DUMP_PATH");
+    const bool wantDump = requestedDumpOp && *requestedDumpOp &&
+                          requestedDumpPath && *requestedDumpPath;
+    const char* encoderDirEnv = std::getenv("NOVA_MNN_ENCODER_DUMP_DIR");
+    const std::string encoderDir = encoderDirEnv ? encoderDirEnv : "";
+    if (!wantTrace && !wantLog && !wantDump && encoderDir.empty()) return;
 
     rtmgr->setMode(Interpreter::Session_Debug);
     std::shared_ptr<std::ofstream> out;
@@ -113,15 +119,55 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
     const char* dumpPathEnv = std::getenv("NOVA_MNN_DUMP_PATH");
     const std::string dumpOp = dumpOpEnv ? dumpOpEnv : "";
     const std::string dumpPath = dumpPathEnv ? dumpPathEnv : "";
+    const char* dumpInputEnv = std::getenv("NOVA_MNN_DUMP_INPUT");
+    const bool dumpInput = dumpInputEnv && dumpInputEnv[0] == '1';
 
     MNN::TensorCallBackWithInfo before =
-        [](const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+        [dumpOp, dumpPath, dumpInput, encoderDir](const std::vector<MNN::Tensor*>& tensors,
+                                     const MNN::OperatorInfo* info) {
             printTensorMeta("before", info, tensors);
+            if (!info) return true;
+            const std::string name = info->name();
+            const bool encoderPoint = !encoderDir.empty() &&
+                ((info->type() == "LayerNorm" && name.find("/blocks.") == 0) ||
+                 name == "/quantizer/project_in/Add_output_0__matmul_converted");
+            const bool namedPoint = dumpInput && name == dumpOp && !dumpPath.empty();
+            if (!encoderPoint && !namedPoint) return true;
+            std::string capturePath = dumpPath;
+            if (encoderPoint) {
+                std::string fileName = name;
+                std::replace(fileName.begin(), fileName.end(), '/', '_');
+                capturePath = encoderDir + "/" + fileName + ".f32";
+            }
+            if (tensors.empty() || !tensors[0]) return false;
+            auto* src = tensors[0];
+            std::unique_ptr<MNN::Tensor> host(new MNN::Tensor(src, MNN::Tensor::CAFFE));
+            if (!src->copyToHostTensor(host.get()) ||
+                host->getType() != halide_type_of<float>() ||
+                host->elementSize() <= 0 || !host->host<float>()) {
+                std::fprintf(stderr, "[s3-mnn] input dump readback/type failed op=%s\n", name.c_str());
+                return false;
+            }
+            std::ofstream bin(capturePath, std::ios::binary | std::ios::trunc);
+            if (!bin) {
+                std::fprintf(stderr, "[s3-mnn] unable to open input dump: %s\n", capturePath.c_str());
+                return false;
+            }
+            bin.write(reinterpret_cast<const char*>(host->host<float>()),
+                      static_cast<std::streamsize>(host->elementSize()) * sizeof(float));
+            bin.close();
+            if (bin.fail()) {
+                std::fprintf(stderr, "[s3-mnn] input dump write failed: %s\n", capturePath.c_str());
+                return false;
+            }
+            std::printf("[s3-mnn] dumped input op=%s tensor=0 dims=%s format=NCHW elements=%d path=%s\n",
+                        name.c_str(), dimsString(host.get()).c_str(), host->elementSize(), capturePath.c_str());
+            std::fflush(stdout);
             return true;
         };
 
     MNN::TensorCallBackWithInfo after =
-        [out, counter, maxOps, logFrom, logTo, dumpOp, dumpPath](const std::vector<MNN::Tensor*>& tensors,
+        [out, counter, maxOps, logFrom, logTo, dumpOp, dumpPath, dumpInput](const std::vector<MNN::Tensor*>& tensors,
                                                                                 const MNN::OperatorInfo* info) {
             const int opIndex = (*counter)++;
             printTensorMeta("after", info, tensors);
@@ -133,17 +179,22 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                              tensors.size());
                 std::fflush(stdout);
             }
-            if (!out || opIndex >= maxOps) return true;
+            const bool selectedDump = !dumpInput && info && !dumpPath.empty() && !dumpOp.empty() &&
+                                      info->name() == dumpOp;
+            const bool traceThis = out && opIndex < maxOps;
+            if (!traceThis && !selectedDump) return true;
 
             for (size_t ti = 0; ti < tensors.size(); ++ti) {
                 MNN::Tensor* src = tensors[ti];
                 if (!src) continue;
 
                 std::shared_ptr<MNN::Tensor> host(
-                    new MNN::Tensor(src, src->getDimensionType()));
-                if (src->copyToHostTensor(host.get())) {
-                    src = host.get();
+                    new MNN::Tensor(src, selectedDump ? MNN::Tensor::CAFFE : src->getDimensionType()));
+                if (!src->copyToHostTensor(host.get())) {
+                    std::fprintf(stderr, "[s3-mnn] tensor readback failed op=%s\n", info->name().c_str());
+                    return false;
                 }
+                src = host.get();
 
                 const int n = src->elementSize();
                 const auto type = src->getType();
@@ -164,7 +215,7 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                     numeric = true;
                 }
 
-                if (!dumpPath.empty() && !dumpOp.empty() &&
+                if (selectedDump && !dumpPath.empty() && !dumpOp.empty() &&
                     info->name() == dumpOp && ti == 0 &&
                     n > 0 && type.code == halide_type_float && type.bits == 32) {
                     std::ofstream bin(dumpPath, std::ios::binary | std::ios::trunc);
@@ -172,16 +223,22 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                         bin.write(reinterpret_cast<const char*>(src->host<float>()),
                                   static_cast<std::streamsize>(n * sizeof(float)));
                         bin.close();
+                        if (bin.fail()) {
+                            std::fprintf(stderr, "[s3-mnn] tensor dump write failed: %s\n", dumpPath.c_str());
+                            return false;
+                        }
                         std::fprintf(stdout,
-                                     "[s3-mnn] dumped op=%s tensor=%zu elements=%d path=%s\n",
-                                     info->name().c_str(), ti, n, dumpPath.c_str());
+                                     "[s3-mnn] dumped op=%s tensor=%zu dims=%s format=NCHW elements=%d path=%s\n",
+                                     info->name().c_str(), ti, dimsString(src).c_str(), n, dumpPath.c_str());
                         std::fflush(stdout);
                     } else {
                         std::fprintf(stderr, "[s3-mnn] unable to dump tensor to %s\n",
                                      dumpPath.c_str());
+                        return false;
                     }
                 }
 
+                if (!traceThis) continue;
                 const double mean = (numeric && n > 0) ? (sum / static_cast<double>(n)) : 0.0;
                 *out << opIndex << '\t'
                      << info->name() << '\t'
@@ -198,7 +255,7 @@ static void installTrace(const std::shared_ptr<Executor::RuntimeManager>& rtmgr,
                      << sumsq << '\t'
                      << weighted << '\n';
             }
-            out->flush();
+            if (out) out->flush();
             return true;
         };
 
@@ -294,6 +351,29 @@ int main(int argc, char** argv) {
     }
     std::memset(featsPtr, 0, static_cast<size_t>(128) * frames * sizeof(float));
 
+    const char* featurePath = std::getenv("NOVA_S3_FEATURES");
+    if (featurePath && *featurePath) {
+        const size_t count = static_cast<size_t>(128) * frames;
+        const auto bytes = static_cast<std::streamsize>(count * sizeof(float));
+        std::ifstream featureFile(featurePath, std::ios::binary | std::ios::ate);
+        if (!featureFile || featureFile.tellg() != bytes) {
+            std::fprintf(stderr, "[s3-mnn] feature file must contain exactly %zu float32 values: %s\n",
+                         count, featurePath);
+            return 12;
+        }
+        featureFile.seekg(0);
+        featureFile.read(reinterpret_cast<char*>(featsPtr), bytes);
+        if (!featureFile) return 12;
+        for (size_t i = 0; i < count; ++i) {
+            if (!std::isfinite(featsPtr[i])) {
+                std::fprintf(stderr, "[s3-mnn] nonfinite feature at index=%zu\n", i);
+                return 12;
+            }
+        }
+        std::printf("[s3-mnn] features=%s layout=1x128x%d float32 elements=%zu\n",
+                    featurePath, frames, count);
+    }
+
     std::vector<VARP> inputs{feats};
     if (!frozenLength) {
         mark("set feats_length");
@@ -318,6 +398,12 @@ int main(int argc, char** argv) {
         return 8;
     }
 
+    const auto* outputInfo = outputs[0]->getInfo();
+    if (!outputInfo || outputInfo->type != halide_type_of<int32_t>() || outputInfo->size <= 0) {
+        std::fprintf(stderr, "[s3-mnn] expected nonempty int32 indices output\n");
+        return 10;
+    }
+
     mark("materialize output");
     const int32_t* outputPtr = outputs[0]->readMap<int32_t>();
     const auto end = std::chrono::steady_clock::now();
@@ -339,10 +425,31 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < info->dim.size(); ++i) {
         std::printf("%s%d", i ? "x" : "", info->dim[i]);
     }
-    std::printf(" elements=%d first_index=%d\n",
+    std::printf(" elements=%zu first_index=%d\n",
                 info->size,
                 info->size > 0 ? outputPtr[0] : -1);
     std::fflush(stdout);
+
+    // Dump all materialized tokens, one decimal int32 per line, for exact
+    // CPU/OpenCL comparison. A requested dump must succeed to report success.
+    const char* tokenDumpPath = std::getenv("NOVA_S3_TOKEN_DUMP");
+    if (tokenDumpPath && *tokenDumpPath) {
+        std::ofstream tokens(tokenDumpPath, std::ios::out | std::ios::trunc);
+        if (!tokens.is_open()) {
+            std::fprintf(stderr, "[s3-mnn] unable to open token dump: %s\n", tokenDumpPath);
+            return 11;
+        }
+        for (size_t i = 0; i < info->size; ++i) {
+            tokens << outputPtr[i] << '\n';
+        }
+        tokens.close();
+        if (tokens.fail()) {
+            std::fprintf(stderr, "[s3-mnn] token dump write failed: %s\n", tokenDumpPath);
+            return 11;
+        }
+        std::printf("[s3-mnn] token_dump=%s elements=%zu\n", tokenDumpPath, info->size);
+        std::fflush(stdout);
+    }
 
     float memoryMB = 0.0f;
     if (rtmgr->getInfo(Interpreter::MEMORY, &memoryMB)) {
@@ -350,6 +457,6 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
     }
 
-    mark("SUCCESS");
+    mark("OUTPUT_MATERIALIZED (token correctness requires CPU comparison)");
     return 0;
 }

@@ -10,8 +10,25 @@
         return;                                                                                   \
     }
 inline float4 gelu(float4 in){
-    float4 value = 0.79788458f * (0.044715f * in * in * in + in);
-    return (1.0f + tanh(value)) * in * 0.5f;
+    // Match the FP32 ARM64 MNNGelu operation order and clamped rational tanh.
+    #pragma OPENCL FP_CONTRACT OFF
+    float4 value = in * in;
+    value = value * in;
+    value = value * 0.044715f;
+    value = value + in;
+    value = value * 0.79788458f;
+    value = clamp(value, (float4)(-5.0f), (float4)(5.0f));
+    float4 x2 = value * value;
+    float4 a = x2 + 378.0f;
+    a = a * x2; a = a + 17325.0f;
+    a = a * x2; a = a + 135135.0f;
+    a = a * value;
+    float4 b = x2 * 28.0f;
+    b = b + 3150.0f; b = b * x2;
+    b = b + 62370.0f; b = b * x2;
+    b = b + 135135.0f;
+    float4 approx = clamp(a / b, (float4)(-1.0f), (float4)(1.0f));
+    return ((approx + 1.0f) * in) * 0.5f;
 }
 // MNN: erfinv via TensorFlow's two-branch polynomial (kept in lockstep with
 // CPU's UnaryErfinv in source/backend/cpu/UnaryUtils.hpp). Avoids the OpenCL
